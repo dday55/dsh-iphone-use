@@ -1,0 +1,58 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>iPhone Use · live preview</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d10; color: #c9ced6;
+    font: 12px/1.4 -apple-system, "SF Pro Text", system-ui, sans-serif; }
+  #frame { display: block; width: 100%; height: 100%; border: 0; background: #0b0d10; }
+  #note { position: fixed; inset: 50% 0 auto; text-align: center; opacity: .7; }
+</style>
+<div id="note">正在连接 iPhone…</div>
+<iframe id="frame" src="/app.html" allow="clipboard-write"></iframe>
+<script>
+// Minimal MCP Apps host: the widget page (`/app.html`) speaks JSON-RPC over
+// postMessage and expects the host to answer `ui/initialize` and to execute
+// `tools/call` against its MCP server. Everything else here is passthrough.
+const frame = document.getElementById("frame");
+const note = document.getElementById("note");
+
+function reply(id, result) {
+  frame.contentWindow?.postMessage({ jsonrpc: "2.0", id, result }, "*");
+}
+
+frame.addEventListener("load", () => {
+  note.style.display = "none";
+});
+
+window.addEventListener("message", async (event) => {
+  if (event.source !== frame.contentWindow) return;
+  const message = event.data;
+  if (!message || message.jsonrpc !== "2.0" || message.id === undefined) return;
+
+  try {
+    if (message.method === "ui/initialize") {
+      reply(message.id, {
+        protocolVersion: "2026-01-26",
+        hostInfo: { name: "DeepSeek Harness", version: "preview" },
+        hostCapabilities: {},
+        hostContext: { theme: "dark", displayMode: "fullscreen" },
+      });
+      return;
+    }
+    if (message.method === "tools/call") {
+      const response = await fetch("/rpc", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(message.params ?? {}),
+      });
+      const payload = await response.json();
+      reply(message.id, payload.result ?? { isError: true, content: [] });
+      return;
+    }
+    // ui/open-link, ui/request-display-mode, ui/message, pings: acknowledge.
+    reply(message.id, {});
+  } catch (error) {
+    reply(message.id, { isError: true, content: [{ type: "text", text: String(error) }] });
+  }
+});
+</script>

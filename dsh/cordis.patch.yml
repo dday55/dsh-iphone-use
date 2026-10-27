@@ -1,0 +1,17 @@
+# DeepSeek Harness bundle layer.
+#
+# One row. The entry plugin resolves every path from its own location, so the
+# same file works from a git install, a `link:` checkout, or a tarball.
+- insert:
+    - id: iphone-use
+      name: ./lib/index.js
+      config:
+        # One pua_* call. Phone actions (tap, swipe, app launch, long typing)
+        # regularly exceed the MCP client's 60 s default.
+        toolCallTimeoutMs: 180000
+        # Interpreter used to run vendor/iphone-use/server/iphone_use.py.
+        python: python3
+        # Live preview: starts with the bundle on http://127.0.0.1:<previewPort>.
+        # Set preview: false to skip it, or pick another first choice of port.
+        preview: true
+        previewPort: 18760

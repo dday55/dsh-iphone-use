@@ -1,0 +1,46 @@
+{
+  "name": "dsh-iphone-use",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DeepSeek Harness bundle for iPhone Use: pua_* MCP tools, the iphone-use skills, and a live screen preview.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dday55/dsh-iphone-use.git"
+  },
+  "files": [
+    "dsh",
+    "vendor"
+  ],
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./dsh/cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-mcp-client": "^0.2.1-rc.3",
+    "@deepseek-ai/dsh-skill-filesystem": "^0.2.1-rc.3",
+    "@deepseek-ai/dsh-tools": "^0.2.1-rc.3"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-mcp-client": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-skill-filesystem": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "exports": {
+    ".": "./dsh/lib/index.js",
+    "./client": "./dsh/client.js",
+    "./package.json": "./package.json"
+  }
+}
