@@ -824,26 +824,8 @@ def _worker(state_dir, job_id, owner_token, base_url):
                     manager._stop_recovery_target(job)
                     job["recovery_phase"] = "starting"
                     _write_json(path, job)
-                forward = manager.state_dir / "runtime/forward"
-                forward.mkdir(exist_ok=True, mode=0o700)
-                for name in ("package.json", "package-lock.json", "forward.mjs"):
-                    shutil.copyfile(PLUGIN_ROOT / "tooling" / name, forward / name)
-                    (forward / name).chmod(0o600)
-                lock_hash = hashlib.sha256((forward / "package-lock.json").read_bytes()).hexdigest()
-                if _read_json(forward / "installed.json", {}).get("lock_hash") != lock_hash or not (forward / "node_modules/appium-ios-device").is_dir():
-                    tooling_modules = PLUGIN_ROOT / "tooling" / "node_modules"
-                    if (tooling_modules / "appium-ios-device").is_dir():
-                        dest_modules = forward / "node_modules"
-                        shutil.rmtree(dest_modules, ignore_errors=True)
-                        shutil.copytree(tooling_modules, dest_modules, symlinks=True)
-                        _write_json(forward / "installed.json", {"lock_hash": lock_hash})
-                    else:
-                        try:
-                            run(["npm", "ci", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund"], cwd=forward)
-                            _write_json(forward / "installed.json", {"lock_hash": lock_hash})
-                        except Exception as e:
-                            raise RuntimeError(f"Failed to install USB forward dependencies via npm ci ({e}). Ensure npm is installed and network is reachable.") from e
-                forward_child = launch(["node", str(forward / "forward.mjs"), config["udid"], str(config["local_port"]), str(config["device_port"])])
+                forward_script = PLUGIN_ROOT / "server/usbmux.py"
+                forward_child = launch([sys.executable, str(forward_script), config["udid"], str(config["local_port"]), str(config["device_port"])])
                 time.sleep(0.15)
                 if forward_child.poll() is not None:
                     raise RuntimeError("USB forward failed to start; inspect the log tail.")
