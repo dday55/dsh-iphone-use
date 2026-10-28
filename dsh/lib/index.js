@@ -198,6 +198,23 @@ export async function apply(ctx, config = {}) {
     }
   }
 
+  // Mark the Session as soon as it actually touches the phone. Waiting for the
+  // model to remember `iphone_preview` made auto-open depend on a habit instead
+  // of on usage, and a READY-only first conversation silently got no preview.
+  // Any pua_* MCP tool call is proof enough.
+  ctx.on("tools/execute", (exec, next) => {
+    try {
+      const name = typeof exec?.name === "string" ? exec.name : "";
+      const sessionId = exec?.agent?.session?.id;
+      if (preview && sessionId && name.startsWith("mcp__iphone_use__")) {
+        preview.markUsed(sessionId);
+      }
+    } catch {
+      // Diagnostics must never block a tool call.
+    }
+    return next();
+  });
+
   // Register on the root scope so the agent sees the tool, but keep the disposer
   // and tie it to this plugin: otherwise a reload leaves the name registered and
   // the next activation dies with "tool already registered".
@@ -206,7 +223,7 @@ export async function apply(ctx, config = {}) {
     unregisterTool = ctx.root.tools.register(defineTool({
       name: "iphone_preview",
       description:
-        "Enable and report the local live iPhone preview for THIS Session. The preview service is already running, but the sidebar Browser tab opens only for Sessions that used iPhone Use; this call marks the Session and returns the URL. Call it once after the phone is READY and give the URL to the user. It performs no phone action.",
+        "Report the local live iPhone preview and return its URL. The sidebar Browser tab opens by itself once this Session actually calls any iPhone Use tool, so this is a status/URL helper rather than the trigger. It performs no phone action.",
       parameters: {},
       output: {
         schema: {

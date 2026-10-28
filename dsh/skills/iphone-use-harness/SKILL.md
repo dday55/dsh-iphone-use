@@ -21,7 +21,7 @@ Harness 不渲染 MCP App（`ui://` 资源）面板，因此：
 - 不要调用 `pua_screen_frame`、`pua_screen_action`。它们是给前端预览页面内部轮询与触控用的，模型不需要也不应直接调用它们。
 - 需要看手机画面时用 `pua_observe(mode="screenshot")`（或 `mode="both"`）；需要判断界面异常时同样先看这张图。
 - `pua_ready` 返回里的 `preview` 字段是预览状态，不是模型观察；不要因为 `preview` 为空或 `paused` 去恢复通道。
-- 实时画面服务随 bundle 启动（默认 `http://127.0.0.1:18760`），但**只有用过 iPhone Use 的会话**才会在右侧栏自动出现 Browser 标签。手机 READY 之后调用一次 `iphone_preview`：它会给当前会话打上「用过」标记（从而让预览自动出现），并返回地址。没用过的会话不会自己弹预览。用户说没看到时也调用它确认一次。那是给人看的，不改变模型的观察方式；两边共用 `screen-state.json`，所以 `pua_screen(action="pause")` 会让预览同时盖上暂停遮罩。
+- 实时画面服务随 bundle 启动（默认 `http://127.0.0.1:18760`），**只要这个会话调用过任意 `pua_*` 工具**，右侧栏就会自动出现 Browser 标签（宿主在 `tools/execute` 里按会话标记，不依赖模型记得额外调用）。`iphone_preview` 只是取地址与自检用的辅助工具，不是触发开关；用户说没看到时调用一次确认即可。那是给人看的，不改变模型的观察方式；两边共用 `screen-state.json`，所以 `pua_screen(action="pause")` 会让预览同时盖上暂停遮罩。
 - `iphone_preview` 只报告地址和运行状态，不碰手机。它返回 `running=false` 时，把 `note` 里的原因告诉用户；确实需要手工兜底时才用 `node dsh/preview/server.mjs`。
 - READY 可能仍会在后台启动 MJPEG 预览流（无人消费）。这不影响操作；若与 Codex 的预览抢流，按下一步实际观察到的截图为准，不必反复重开。
 

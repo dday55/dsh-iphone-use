@@ -76,8 +76,10 @@ Web 构建下客户端插件会自动探测并打开右侧栏标签（`dsh/clien
 
 自动打开的规则（0.1.0 起：**用过 iPhone Use 的会话才打开**）：
 
-- 触发点在宿主侧：`iphone_preview` 工具执行时用 `exec.agent.session.id` 把当前会话标记到预览
-  服务（与侧边栏的 `data-row-key="session:<id>"` 是同一串）。没调用过这个工具的会话不会被标记。
+- 触发点在宿主侧：入口插件挂 `ctx.on("tools/execute")`，只要调用的是 `mcp__iphone_use__*`，
+  就用 `exec.agent.session.id` 把该会话标记到预览服务（与侧边栏的 `session:<id>` 是同一串）。
+  早期版本只认 `iphone_preview`，结果是「模型忘记调用 → 首个对话不弹预览」；现在只要真的用了手机
+  就会标记，`iphone_preview` 退化为取地址/自检。
 - 浏览器半每 3s 问一次 `GET /health?session=<id>`；`used: true` 才放置 Browser 标签。标签已
   存在时只读 DOM（不请求）；会话没有用过就保持安静。
 - 「已打开」只认 DOM：Browser 标签是真实的 `iframe`/`webview` 节点，按 URL 命中即视为该会话
