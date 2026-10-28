@@ -137,6 +137,9 @@ class ScreenHub:
         self._state_cache = None
         # Marketing name of the phone for the header; never its own name or identifiers.
         self.device = None
+        for p in self.state_dir.glob(".screen-*"):
+            try: p.unlink()
+            except OSError: pass
         atexit.register(self.close)
 
     @staticmethod
@@ -281,12 +284,19 @@ class ScreenHub:
             self._lease_until = 0
             self._stop.set()
             child = self._child
+            sock = getattr(self, "_sock", None)
             self._frame = None
+        if sock:
+            try: sock.close()
+            except OSError: pass
         if child and child.poll() is None:
             try:
                 child.terminate()
             except OSError:
                 pass
+        for name in ("screen-live.jpg", "screen-live.json"):
+            try: (self.state_dir / name).unlink()
+            except OSError: pass
 
     def paused(self):
         return self._paused()
@@ -517,36 +527,40 @@ class ScreenHub:
     def _run(self, stop):
         backoff = 0.5
         while self._live(stop):
-            child = None
+            sock = None
             received = False
             try:
-                command = self._command()
-                if command:
-                    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                             stderr=subprocess.DEVNULL, bufsize=0)
-                    with self._lock:
-                        self._child = child
-                    parser = MJPEGParser()
-                    while self._live(stop) and child.poll() is None:
-                        ready, _, _ = select.select([child.stdout], [], [], 0.1)
-                        if not ready:
-                            continue
-                        chunk = os.read(child.stdout.fileno(), 65536)
-                        if not chunk:
+                config = json.loads((self.state_dir / "config.json").read_text())
+                udid = config.get("udid")
+                port = config.get("mjpeg_device_port", 9100)
+                from usbmux import connect_device_port
+                sock = connect_device_port(udid, port)
+                sock.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: multipart/x-mixed-replace\r\nConnection: close\r\n\r\n")
+                with self._lock:
+                    self._sock = sock
+                parser = MJPEGParser()
+                while self._live(stop):
+                    ready, _, _ = select.select([sock], [], [], 0.2)
+                    if not ready:
+                        continue
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    for raw, (width, height) in parser.feed(chunk):
+                        if not self._live(stop):
                             break
-                        for raw, (width, height) in parser.feed(chunk):
-                            if not self._live(stop):
-                                break
-                            self._publish_frame(raw, width, height, stop)
-                            received = True
-            except (OSError, ValueError):
+                        self._publish_frame(raw, width, height, stop)
+                        received = True
+            except Exception:
                 # Keep the last frame through a transient device/stream gap.
                 pass
             finally:
-                self._terminate(child)
+                if sock:
+                    try: sock.close()
+                    except OSError: pass
                 with self._lock:
-                    if self._child is child:
-                        self._child = None
+                    if getattr(self, "_sock", None) is sock:
+                        self._sock = None
                     if self._paused():
                         self._frame = None
             if received:
