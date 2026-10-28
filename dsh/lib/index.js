@@ -142,9 +142,49 @@ export async function apply(ctx, config = {}) {
     }
   };
 
+  // Serve-and-check the very bundle the page is told to load. `has_module: false`
+  // or a non-200 status means the host cannot deliver this client half at all;
+  // the browser then has nothing to execute no matter how often it reloads.
+  let bundleProbe = { at: 0, value: null };
+  const clientBundle = async () => {
+    const now = Date.now();
+    if (bundleProbe.value && now - bundleProbe.at < 15000) return bundleProbe.value;
+    let value = null;
+    try {
+      const mods = clientModules ?? ctx.get?.("clientModules") ?? null;
+      const entry = mods?.graph?.()?.entries?.find((row) => row.id === "dsh-iphone-use");
+      if (!entry) {
+        value = { reason: "entry-absent-from-graph" };
+      } else if (typeof mods.fetchBundle !== "function") {
+        value = { url: String(entry.url), reason: "fetchBundle-unavailable" };
+      } else {
+        const target = new URL(entry.url, "http://127.0.0.1");
+        const response = await mods.fetchBundle(new Request(target, { method: "GET" }));
+        const text = await response.text();
+        value = {
+          url: String(entry.url),
+          status: response.status,
+          bytes: text.length,
+          has_module: text.includes("dsh-iphone-use"),
+        };
+      }
+    } catch (error) {
+      value = { reason: "probe-threw", error: String(error?.message ?? error) };
+    }
+    bundleProbe = { at: now, value };
+    return value;
+  };
+
   if (previewEnabled) {
     try {
-      preview = createPreviewServer({ upstream: UPSTREAM, python, env, clientGraph, selfClientId: "dsh-iphone-use" });
+      preview = createPreviewServer({
+        upstream: UPSTREAM,
+        python,
+        env,
+        clientGraph,
+        clientBundle,
+        selfClientId: "dsh-iphone-use",
+      });
       try {
         const info = await preview.listen(preferredPort);
         previewState.url = info.url;

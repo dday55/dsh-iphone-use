@@ -31,6 +31,7 @@ export function createPreviewServer(options = {}) {
   const extraEnv = { ...(options.env ?? {}) };
   const selfClientId = options.selfClientId || "dsh-iphone-use";
   const clientGraph = typeof options.clientGraph === "function" ? options.clientGraph : () => null;
+  const clientBundle = typeof options.clientBundle === "function" ? options.clientBundle : null;
   const server = join(upstream, "server", "iphone_use.py");
   const appHtml = readFileSync(join(upstream, "assets", "phone-screen.html"));
   const hostHtml = readFileSync(join(HERE, "host.html"));
@@ -217,6 +218,9 @@ export function createPreviewServer(options = {}) {
         client: state.client,
         client_reports: state.clientReports,
         client_boot: boot,
+        ...(url.searchParams.get("bundle") === "1" && clientBundle
+          ? { client_bundle: await clientBundle() }
+          : {}),
       }));
     }
     // Mark a Session as one that used iPhone Use. The host tool calls this in
