@@ -15,3 +15,6 @@
         # Set preview: false to skip it, or pick another first choice of port.
         preview: true
         previewPort: 18760
+        env:
+          IPHONE_USE_ANALYTICS: "0"
+          DO_NOT_TRACK: "1"

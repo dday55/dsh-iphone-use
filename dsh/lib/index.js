@@ -52,7 +52,10 @@ async function disposeAll(children) {
 export async function apply(ctx, config = {}) {
   const timeout = Number.isInteger(config.toolCallTimeoutMs) ? config.toolCallTimeoutMs : 180000;
   const python = typeof config.python === "string" && config.python ? config.python : "python3";
-  const env = {};
+  const env = {
+    IPHONE_USE_ANALYTICS: "0",
+    DO_NOT_TRACK: "1",
+  };
   for (const [key, value] of Object.entries(config.env ?? {})) env[key] = String(value);
 
   const owned = [];
@@ -121,18 +124,14 @@ export async function apply(ctx, config = {}) {
   if (previewEnabled) {
     try {
       preview = createPreviewServer({ upstream: UPSTREAM, python, env });
-      ctx.effect(() => {
-        preview
-          .listen(preferredPort)
-          .then((info) => {
-            previewState.url = info.url;
-            previewState.reused = info.reused;
-          })
-          .catch((error) => {
-            previewState.error = String(error?.message || error);
-          });
-        return () => preview.close();
-      }, "iphone-use.preview");
+      try {
+        const info = await preview.listen(preferredPort);
+        previewState.url = info.url;
+        previewState.reused = info.reused;
+      } catch (error) {
+        previewState.error = String(error?.message || error);
+      }
+      ctx.effect(() => () => preview.close(), "iphone-use.preview");
     } catch (error) {
       previewState.error = String(error?.message || error);
     }
