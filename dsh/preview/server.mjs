@@ -29,6 +29,8 @@ export function createPreviewServer(options = {}) {
   const upstream = options.upstream || DEFAULT_UPSTREAM;
   const python = options.python || process.env.IPHONE_USE_PYTHON || "python3";
   const extraEnv = { ...(options.env ?? {}) };
+  const selfClientId = options.selfClientId || "dsh-iphone-use";
+  const clientGraph = typeof options.clientGraph === "function" ? options.clientGraph : () => null;
   const server = join(upstream, "server", "iphone_use.py");
   const appHtml = readFileSync(join(upstream, "assets", "phone-screen.html"));
   const hostHtml = readFileSync(join(HERE, "host.html"));
@@ -189,6 +191,19 @@ export function createPreviewServer(options = {}) {
         "cache-control": "no-store",
       });
       const session = url.searchParams.get("session");
+      // Host-side evidence: is this package's client module part of the boot
+      // graph the page was served with? When this is false the browser can never
+      // run the plugin no matter how often the page is reloaded.
+      let boot = null;
+      try {
+        const ids = clientGraph();
+        if (Array.isArray(ids)) {
+          boot = { total: ids.length, has_self: ids.includes(selfClientId) };
+          if (url.searchParams.get("graph") === "1") boot.ids = ids;
+        }
+      } catch {
+        boot = null;
+      }
       return response.end(JSON.stringify({
         // `used` answers the only question the browser half asks: did the model
         // use iPhone Use in this very Session?
@@ -201,6 +216,7 @@ export function createPreviewServer(options = {}) {
         error: state.error,
         client: state.client,
         client_reports: state.clientReports,
+        client_boot: boot,
       }));
     }
     // Mark a Session as one that used iPhone Use. The host tool calls this in

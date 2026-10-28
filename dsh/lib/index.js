@@ -121,9 +121,30 @@ export async function apply(ctx, config = {}) {
   const previewState = { url: null, error: null, reused: false };
   let preview = null;
 
+  // Host-side evidence for the browser half: which client bundles the page was
+  // actually served with. `client_boot.has_self === false` means this package's
+  // client plugin was never in the boot graph, so reloading the page cannot help.
+  let clientModules = null;
+  try {
+    ctx.inject(["clientModules"], (scoped) => {
+      clientModules = scoped.clientModules ?? scoped.get?.("clientModules") ?? null;
+    });
+  } catch {
+    // Older hosts without the client module system.
+  }
+  const clientGraph = () => {
+    try {
+      const mods = clientModules ?? ctx.get?.("clientModules") ?? null;
+      const entries = mods?.graph?.()?.entries;
+      return Array.isArray(entries) ? entries.map((entry) => entry.id) : null;
+    } catch {
+      return null;
+    }
+  };
+
   if (previewEnabled) {
     try {
-      preview = createPreviewServer({ upstream: UPSTREAM, python, env });
+      preview = createPreviewServer({ upstream: UPSTREAM, python, env, clientGraph, selfClientId: "dsh-iphone-use" });
       try {
         const info = await preview.listen(preferredPort);
         previewState.url = info.url;
@@ -179,10 +200,14 @@ export async function apply(ctx, config = {}) {
         const running = Boolean(previewState.url);
         const frameSeq = preview?.state?.lastSeq ?? 0;
         const client = preview?.state?.client ?? null;
+        const graphIds = clientGraph();
+        const inBoot = Array.isArray(graphIds) ? graphIds.includes("dsh-iphone-use") : null;
         // `client === null` is the honest signal that the browser half never ran
         // in the page that is loaded now: the tab cannot open itself in that page.
         const clientNote = !client
-          ? "浏览器半侧尚未在本页面运行（需要刷新窗口 Cmd+R 才会加载 dsh/client.js）。"
+          ? inBoot === false
+            ? "本包的客户端插件根本没有进入当前页面的启动清单（client 未进入 boot graph），因此刷新或重启都无效；请重装插件后再重启桌面应用。"
+            : "客户端插件已在启动清单里，但本页面尚未运行它（请完全退出并重新打开应用）。"
           : client.event === "openTab-failed"
             ? `浏览器半侧已加载，但 openTab 失败：${client.error ?? "未知原因"}。`
             : `浏览器半侧最近报告：${client.event}${client.unconfirmed ? `（未确认 ${client.unconfirmed} 次）` : ""}。`;
