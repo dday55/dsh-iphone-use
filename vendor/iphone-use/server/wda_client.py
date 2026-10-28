@@ -117,8 +117,23 @@ class WDAClient:
             self.connection.timeout = budget
             if self.connection.sock:
                 self.connection.sock.settimeout(budget)
+                try:
+                    self.connection.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                except OSError:
+                    pass
             body = None if payload is None else json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
-            self.connection.request(method, path, body, {"Content-Type": "application/json", "Accept": "application/json"})
+            try:
+                self.connection.request(method, path, body, {"Content-Type": "application/json", "Accept": "application/json"})
+            except (http.client.CannotSendRequest, http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError):
+                # Stale idle socket closed by remote; reconnect fresh once
+                self.close()
+                self.connection = http.client.HTTPConnection(self.host, self.port, timeout=budget)
+                self.connection.request(method, path, body, {"Content-Type": "application/json", "Accept": "application/json"})
+                if self.connection.sock:
+                    try:
+                        self.connection.sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    except OSError:
+                        pass
             network_socket = self.connection.sock
             remaining = deadline-time.monotonic()
             if remaining <= 0:
