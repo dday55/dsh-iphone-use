@@ -53,6 +53,7 @@ export function createPreviewServer(options = {}) {
   let nextId = 0;
   const pending = new Map();
   let buffer = "";
+  let startPromise = null;
 
   function rpc(method, params) {
     const id = ++nextId;
@@ -64,13 +65,14 @@ export function createPreviewServer(options = {}) {
 
   function ensureMcp() {
     if (state.ready) return Promise.resolve();
-    if (state.started) return Promise.resolve();
+    if (startPromise) return startPromise;
     state.started = true;
     child = spawn(python, [server], {
       cwd: upstream,
       env: {
         ...process.env,
         IPHONE_USE_ANALYTICS: process.env.IPHONE_USE_ANALYTICS ?? "0",
+        DO_NOT_TRACK: "1",
         ...extraEnv,
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -79,7 +81,12 @@ export function createPreviewServer(options = {}) {
     child.on("exit", (code) => {
       state.ready = false;
       state.started = false;
+      startPromise = null;
       state.error = `MCP server exited (${code})`;
+      for (const [id, entry] of pending.entries()) {
+        pending.delete(id);
+        entry.reject(new Error(`MCP server exited before response (code ${code})`));
+      }
     });
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
@@ -99,17 +106,25 @@ export function createPreviewServer(options = {}) {
           : entry.resolve(message.result);
       }
     });
-    return (async () => {
-      await rpc("initialize", {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "iphone-use-preview", version: "1.0" },
-      });
-      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
-      // Starts the cached MJPEG hub and the same session the model uses.
-      await rpc("tools/call", { name: "pua_screen", arguments: { action: "open" } });
-      state.ready = true;
+    startPromise = (async () => {
+      try {
+        await rpc("initialize", {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "iphone-use-preview", version: "1.0" },
+        });
+        child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+        // Starts the cached MJPEG hub and the same session the model uses.
+        await rpc("tools/call", { name: "pua_screen", arguments: { action: "open" } });
+        state.ready = true;
+      } catch (error) {
+        state.ready = false;
+        state.started = false;
+        startPromise = null;
+        throw error;
+      }
     })();
+    return startPromise;
   }
 
   async function callTool(name, args) {
@@ -126,7 +141,34 @@ export function createPreviewServer(options = {}) {
     return result;
   }
 
+  function isTrustedOrigin(origin) {
+    if (!origin) return true;
+    try {
+      const parsed = new URL(origin);
+      return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+    } catch {
+      return false;
+    }
+  }
+
+  function corsHeaders(request) {
+    const origin = request.headers.origin;
+    if (origin && isTrustedOrigin(origin)) {
+      return {
+        "access-control-allow-origin": origin,
+        "vary": "Origin",
+      };
+    }
+    return {};
+  }
+
   const http = createServer(async (request, response) => {
+    const origin = request.headers.origin;
+    if (origin && !isTrustedOrigin(origin)) {
+      response.writeHead(403, { "content-type": "text/plain" });
+      return response.end("Forbidden: cross-origin access from untrusted origin denied.");
+    }
+
     const url = new URL(request.url, `http://${HOST}`);
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -143,7 +185,7 @@ export function createPreviewServer(options = {}) {
       state.probes += 1;
       response.writeHead(200, {
         "content-type": "application/json",
-        "access-control-allow-origin": "*",
+        ...corsHeaders(request),
         "cache-control": "no-store",
       });
       const session = url.searchParams.get("session");
@@ -173,11 +215,11 @@ export function createPreviewServer(options = {}) {
         session = "";
       }
       if (!session) {
-        response.writeHead(400, { "content-type": "application/json", "access-control-allow-origin": "*" });
+        response.writeHead(400, { "content-type": "application/json", ...corsHeaders(request) });
         return response.end(JSON.stringify({ ok: false, error: "session_required" }));
       }
       state.usedSessions.add(session);
-      response.writeHead(204, { "access-control-allow-origin": "*", "cache-control": "no-store" });
+      response.writeHead(204, { ...corsHeaders(request), "cache-control": "no-store" });
       return response.end();
     }
     // Browser half telemetry: proves whether dsh/client.js ran in the loaded page
@@ -193,14 +235,14 @@ export function createPreviewServer(options = {}) {
         state.client = { event: "unparsed", raw: String(body).slice(0, 200) };
       }
       response.writeHead(204, {
-        "access-control-allow-origin": "*",
+        ...corsHeaders(request),
         "cache-control": "no-store",
       });
       return response.end();
     }
     if (request.method === "OPTIONS") {
       response.writeHead(204, {
-        "access-control-allow-origin": "*",
+        ...corsHeaders(request),
         "access-control-allow-methods": "GET, POST, OPTIONS",
         "access-control-allow-headers": "content-type",
         "access-control-max-age": "600",
@@ -213,11 +255,11 @@ export function createPreviewServer(options = {}) {
       try {
         const { name, arguments: args } = JSON.parse(body || "{}");
         const result = await callTool(name, args);
-        response.writeHead(200, { "content-type": "application/json" });
+        response.writeHead(200, { "content-type": "application/json", ...corsHeaders(request) });
         return response.end(JSON.stringify({ result }));
       } catch (error) {
         state.error = String(error?.message || error);
-        response.writeHead(200, { "content-type": "application/json" });
+        response.writeHead(200, { "content-type": "application/json", ...corsHeaders(request) });
         return response.end(JSON.stringify({
           result: { isError: true, content: [{ type: "text", text: state.error }] },
         }));
@@ -273,6 +315,11 @@ export function createPreviewServer(options = {}) {
       try { child?.kill(); } catch { /* already gone */ }
       state.ready = false;
       state.started = false;
+      startPromise = null;
+      for (const [id, entry] of pending.entries()) {
+        pending.delete(id);
+        entry.reject(new Error("Preview server closed"));
+      }
     },
   };
 }
