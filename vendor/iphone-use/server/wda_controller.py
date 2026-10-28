@@ -521,7 +521,7 @@ class PhoneController:
         else:
             tool,step="pua_tap","Inspect the attached screenshot FIRST, then tap the visible target with pua_tap x/y; a returned tap or tap_point is already in iPhone points."
         recovery={**error.details.get("recovery",{}),"use":"coordinates" if error.code in SELECTOR_FAILURES else "screenshot","visual_check_required":True,"replay_action":False,
-                  "next_step":step+" Image pixels x image.pixel_to_point give iPhone points. Inspect the image content, not its base64 text; through functions.exec forward image blocks with image(block), or open observation.image.path with view_image. If no screenshot is available, take one pua_observe(mode=screenshot) before acting. Do not try other selector spellings or read the tree again first."}
+                  "next_step":step+" Image pixels x image.pixel_to_point give iPhone points. Inspect the image content directly. If no screenshot is available, take one pua_observe(mode=screenshot) before acting. Do not try other selector spellings or read the tree again first."}
         recovery.pop("next_tool",None);recovery.pop("next_arguments",None)
         if tool:recovery["next_tool"]=tool
         if "image" not in error.details.get("observation",{}):
