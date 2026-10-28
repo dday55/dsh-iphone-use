@@ -89,10 +89,13 @@ Web 构建下客户端插件会自动探测并打开右侧栏标签（`dsh/clien
   `sidebarRight.commandTarget()`——后者在切换瞬间可能仍返回旧会话。
 - `openTab` 抛错（没有已 adopt 的 Session、或 Browser 类型不可用）按 1.2s 重试；放置成功但
   DOM 里没出现时按 1.2s → 2.4s → 4.8s … 30s 退避。
-- **可自证**：浏览器半把 `loaded` / `placed` / `openTab-failed` / `mounted` /
-  `closed-in-session` 事件 POST 到 `preview` 的 `/client-report`，`/health` 里回显为
-  `client`、`client_reports`。`client === null` 就是「当前页面根本没加载 `dsh/client.js`」，
-  此时预览不可能自己打开，刷新窗口才会加载。
+- **可自证**：浏览器半把 `module-evaluated` / `apply-entered` / `apply-threw` / `idle` /
+  `placed` / `openTab-failed` / `mounted` / `closed-in-session` 事件 POST 到 `preview` 的
+  `/client-report`，`/health` 里回显为 `client`、`client_reports`；同时 `client_boot`
+  给出宿主侧证据（启动清单里的模块总数、`has_self`），`?bundle=1` 还会用宿主自己的
+  `fetchBundle()` 取一遍页面要加载的那段 JS，报告 `status` / `bytes` / `has_module`。
+  这样 `client === null` 能分清三种阶段：清单里没有（装错/没装上）、清单里有但宿主发不出
+  （bundle 路由问题）、页面没执行（页面的加载/执行问题）。
 
 实测（Web 构建 + 手动启用 Browser 标签、headless Chrome）：打开一个已有会话后，右侧栏自动
 出现 `http://127.0.0.1:18760/` 的 Browser 标签，`/health` 从 `frame_seq=0` 变为
@@ -114,6 +117,29 @@ Codex 的预览是一个 MCP App：`assets/phone-screen.html` 用 postMessage �
 
 预览默认开启，`config.preview: false` 可关、`config.previewPort` 可改首选端口；
 端口被占时自动顺延，并只复用真正属于自己的监听（`/health` 里带 `frame_seq` 的那个）。
+
+### 3.1 桌面端与 Web 端的两处硬差异
+
+这两点都踩过，都会表现成「Web 能用、Desktop 不弹预览」，且都不在前端逻辑里：
+
+- **页面的 origin 不同，预览服务必须放行 `dsh-app://`**。Desktop 的渲染进程从自定义协议
+  `dsh-app://app` 加载，客户端插件对 `127.0.0.1:18760` 的 `GET /health`、`POST /client-report`
+  都是跨域请求；Web 端则是同 loopback 的 http origin。`preview/server.mjs` 的
+  `isTrustedOrigin()` 因此同时信任 `dsh-app:`、`null`（不透明来源）与 loopback http；
+  只信任 loopback http 会让桌面端每次请求都 CORS 失败，`/health` 永远 `client: null`。
+  公网 origin 仍然 403。
+- **打包版没有「刷新页面」入口**。`Reload Page` / `Restart App Host` 菜单项仅在开发模式注册，
+  DevTools 也是隐藏项（`visible: false`）。安装/更新插件只重启后端，已经打开的窗口
+  不会重新拉取启动清单，所以**装完插件必须完全退出应用（⌘Q，进程数归零）再打开**；点窗口
+  红叉只是隐藏窗口，页面不会重新加载。验证方式：`pgrep -f "DeepSeek Harness.app/Contents/MacOS"`
+  在退出后应为 0。
+
+排查顺序（都是一条 curl 能看出来的）：
+
+1. `curl -s 'http://127.0.0.1:18760/health?bundle=1'`
+2. `client_boot.has_self` 为 false → 插件没进启动清单（安装或包解析问题）
+3. `client_bundle.status !== 200` 或 `has_module: false` → 宿主发不出客户端 JS
+4. 两者都正常但 `client: null` → 页面侧没执行：优先怀疑上面两条（origin 被挡 / 页面没重载）
 
 ## 4. 沙箱：只有 CLI 从受限终端启动时才会踩
 

@@ -41,6 +41,7 @@ dsh plugin --profile <profile> add https://github.com/dday55/dsh-iphone-use.git
 同一个会话里手动关掉后不会再自动重开（按会话 id 记住，刷新保持）；关掉浏览器窗口或重启应用后
 记忆清空。画面带机型、Live 状态、刷新/主屏幕/截图按钮、点击光标、认证暂停遮罩。
 
+- **桌面端装完/更新插件要完全退出应用再打开**（⌘Q；窗口红叉只是隐藏窗口，页面不会重新加载，而打包版没有「刷新页面」菜单）。
 - 端口被占用会自动顺延（18761…），`iphone_preview` 返回实际地址。
 - Web profile 默认关闭 Browser 标签，需要时在 profile patch 加 `- id: ui-sidebar-browser` / `disabled: false`；Desktop 默认开启。
 - 关掉预览：`- id: iphone-use` → `config: { preview: false }`；换首选端口用 `previewPort`。
