@@ -748,8 +748,53 @@ class PhoneController:
         if selector is not None:self.post(path+"/click",{})
         if replace:
             self.post(path+"/clear",{})
+        # Fast path: For text >= 10 characters, try clipboard paste to avoid slow typing
+        if len(text) >= 10:
+            uuid = path.split("/")[-1] if path.startswith("/element/") else "0"
+            if self.try_paste_text(text, uuid):
+                return self.finish_input({"path":path,"expected":text if replace else str(before)+text,
+                                          "verify":verify,"submit":submit,"expect":expect,"observe":observe,
+                                          "typed":len(text),"total":len(text)})
         return self.type_pieces({"path":path,"focused":selector is None,"pieces":split_text(text,self.typing_piece),"typed":0,"total":len(text),
                                  "expected":text if replace else str(before)+text,"verify":verify,"submit":submit,"expect":expect,"observe":observe})
+
+    def try_paste_text(self, text, element_uuid="0"):
+        """Fast-path paste for long text via WDA setPasteboard and keyboardInput Cmd+V."""
+        try:
+            b64_content = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            self.client.request("POST", "/wda/setPasteboard", {"content": b64_content, "contentType": "plaintext"})
+            sid = getattr(self.client, "session_id", None)
+            if sid:
+                # 1048576 is XCUIKeyModifierCommand (1 << 20)
+                self.client.request("POST", f"/session/{sid}/wda/element/{element_uuid}/keyboardInput",
+                                    {"keys": [{"key": "v", "modifierFlags": 1048576}]})
+                return True
+        except Exception:
+            pass
+        return False
+
+    def finish_input(self, plan):
+        self.pending_input = None
+        if plan.get("verify"):
+            actual = self.client.session("GET", plan["path"] + "/attribute/value")
+            if actual != plan["expected"]:
+                fail("input_mismatch", "Typed text did not round-trip exactly. Do not submit or blindly type it again.",
+                     expected_length=len(plan["expected"]), actual_length=len(str(actual or "")))
+        result = {"action_executed": True, "action_complete": True, "verified": bool(plan.get("verify")),
+                  "verification_deferred": not plan.get("verify"), "exact_readback": bool(plan.get("verify")),
+                  "characters": plan["total"], "submitted": False}
+        if plan.get("submit"):
+            self.post("/wda/keys", {"value": ["\n"]})
+            result.update({"submitted": True, "verified": False, "verification_deferred": True, "submission_verified": False,
+                           "verification_required": "Check the final submission result before claiming task completion; do not automatically repeat submission."})
+        if plan.get("expect"):
+            result["postcondition"] = self.wait(plan["expect"])
+            result.update(verified=True, verification_deferred=False)
+            if plan.get("submit"):
+                result.update(submission_verified=True, verification_scope="Expected selector is present; verify the final business outcome before claiming task completion.")
+        if plan.get("observe") and plan["observe"] != "none":
+            result["observation"] = self.observe_after(plan["observe"])
+        return result
 
     def focused_field(self):
         """The editable element that has keyboard focus, for typing after a coordinate tap."""
@@ -799,21 +844,7 @@ class PhoneController:
             return {"action_executed":True,"action_complete":False,"input_complete":False,"verified":False,"verification_deferred":True,
                     "characters":plan["typed"],"remaining_characters":plan["total"]-plan["typed"],"submitted":False,"continue_token":plan["token"],
                     "next_step":"Call pua_type_text with only continue_token to type the rest. Do not resend the text or act on the phone in between."}
-        self.pending_input=None
-        if plan["verify"]:
-            actual=self.client.session("GET",plan["path"]+"/attribute/value")
-            if actual!=plan["expected"]:
-                fail("input_mismatch","Typed text did not round-trip exactly. Do not submit or blindly type it again.",expected_length=len(plan["expected"]),actual_length=len(str(actual or "")))
-        result={"action_executed":True,"action_complete":True,"verified":plan["verify"],"verification_deferred":not plan["verify"],"exact_readback":plan["verify"],"characters":plan["total"],"submitted":False}
-        if plan["submit"]:
-            self.post("/wda/keys",{"value":["\n"]})
-            result.update({"submitted":True,"verified":False,"verification_deferred":True,"submission_verified":False,"verification_required":"Check the final submission result before claiming task completion; do not automatically repeat submission."})
-        if plan["expect"]:
-            result["postcondition"]=self.wait(plan["expect"])
-            result.update(verified=True,verification_deferred=False)
-            if plan["submit"]:result.update(submission_verified=True,verification_scope="Expected selector is present; verify the final business outcome before claiming task completion.")
-        if plan["observe"]!="none":result["observation"]=self.observe_after(plan["observe"])
-        return result
+        return self.finish_input(plan)
 
     def continue_input(self,token):
         plan=self.pending_input
@@ -914,7 +945,19 @@ class PhoneController:
                 fail("modal_requires_region" if region is None else "blocked_scroll_region","Native modals are present. The intended scroll area must be explicit and inside every modal's bounds; otherwise handle the foreground modal first.",**details)
         x=area["x"]+area["width"]/2;y=area["y"]+area["height"]/2
         dx=area["width"]*.32;dy=area["height"]*.32
-        points={"up":(x,y+dy,x,y-dy),"down":(x,y-dy,x,y+dy),"left":(x+dx,y,x-dx,y),"right":(x-dx,y,x+dx,y)}[direction]
+        raw_points={"up":(x,y+dy,x,y-dy),"down":(x,y-dy,x,y+dy),"left":(x+dx,y,x-dx,y),"right":(x-dx,y,x+dx,y)}[direction]
+        # Safe Area Clamping: prevent swiping into notification center (top 60pt)
+        # or Home Indicator (bottom 45pt) which triggers app exit/task switch.
+        v_w, v_h = viewport["width"], viewport["height"]
+        safe_top = min(60.0, v_h * 0.1)
+        safe_bottom = min(45.0, v_h * 0.1)
+        safe_margin = min(15.0, v_w * 0.05)
+        fx, fy, tx, ty = raw_points
+        fx = max(safe_margin, min(v_w - safe_margin, fx))
+        tx = max(safe_margin, min(v_w - safe_margin, tx))
+        fy = max(safe_top, min(v_h - safe_bottom, fy))
+        ty = max(safe_top, min(v_h - safe_bottom, ty))
+        points = (fx, fy, tx, ty)
         # max_attempts=2 remains accepted for older callers, but a failed first
         # gesture now yields a screenshot instead of an unseen fallback gesture.
         self.post("/wda/dragfromtoforduration",dict(zip(("fromX","fromY","toX","toY"),points),duration=.1))
