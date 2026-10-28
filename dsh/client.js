@@ -92,15 +92,19 @@ window.__ModuleLoader__.load({
       let mountedFor = null;
       // Session we already reported as "not used" so the 3 s poll stays quiet.
       let idleFor = null;
+      // Progressive poll backoff counter for idle sessions.
+      let idlePolls = 0;
 
       // The Session whose pane is on screen. The selected sidebar row carries it
       // as `data-row-key="session:<id>"`, which survives Session switches.
       const currentSessionId = () => {
         try {
-          const rows = document.querySelectorAll('[data-row-key^="session:"]');
-          const selected = document.querySelector('[data-row-key^="session:"][aria-selected="true"]') ?? rows[rows.length - 1];
+          const selected = document.querySelector('[data-row-key^="session:"][aria-selected="true"]');
           const key = selected?.getAttribute("data-row-key") ?? "";
-          if (key.startsWith("session:")) return key.slice("session:".length) || null;
+          if (key.startsWith("session:")) {
+            const id = key.slice("session:".length);
+            if (id) return id;
+          }
         } catch {
           // Fall through to the service.
         }
@@ -180,9 +184,15 @@ window.__ModuleLoader__.load({
         }
         confirmed = false;
 
+        // If no Session is on screen (e.g. home/plugins/settings page), stay quiet.
+        if (!sessionId) {
+          schedule(WATCH_MS);
+          return;
+        }
+
         // The user closed the preview in this Session: stay quiet until the
         // window is reopened.
-        if (sessionId && wasClosed(sessionId)) {
+        if (wasClosed(sessionId)) {
           schedule(WATCH_MS);
           return;
         }
@@ -204,12 +214,16 @@ window.__ModuleLoader__.load({
         if (!used) {
           if (idleFor !== sessionId) {
             idleFor = sessionId;
+            idlePolls = 0;
             report("idle", { session: sessionId });
           }
-          schedule(POLL_MS);
+          idlePolls += 1;
+          const delay = idlePolls <= 4 ? POLL_MS : idlePolls <= 12 ? POLL_MS * 2 : 15000;
+          schedule(delay);
           return;
         }
         idleFor = null;
+        idlePolls = 0;
 
         try {
           // Browser page kind; the initial address travels in navigation params.
@@ -231,6 +245,7 @@ window.__ModuleLoader__.load({
       // tab from the previous Session stops being on screen.
       const onSessionishEvent = () => {
         if (cancelled) return;
+        idlePolls = 0;
         if (previewTabMounted()) return;
         confirmed = false;
         unconfirmed = 0;
