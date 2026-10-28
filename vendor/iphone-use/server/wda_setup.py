@@ -185,7 +185,11 @@ class SetupManager:
             raise ValueError(f"WDA source must be pinned to {WDA_VERSION} ({WDA_COMMIT}); existing checkouts are never changed automatically.")
         dirty = _run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"])
         if not dirty["ok"] or dirty["stdout"].strip():
-            raise ValueError("Pinned WDA source has tracked changes. Use fetch for a clean isolated checkout; existing work is preserved.")
+            # Xcode automatically touches project.pbxproj when developers configure team/signing.
+            # Allow changes if they are limited to project.pbxproj so signing doesn't break automated setup.
+            changed = [line.strip().split()[-1] for line in dirty["stdout"].splitlines() if line.strip()]
+            if not all("project.pbxproj" in path for path in changed):
+                raise ValueError("Pinned WDA source has tracked changes outside project.pbxproj. Use fetch for a clean isolated checkout; existing work is preserved.")
         return source
 
     @staticmethod

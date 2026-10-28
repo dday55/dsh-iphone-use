@@ -1,6 +1,9 @@
 // A single owned USB connection to WDA's independent MJPEG port. stdout is JPEG
 // stream bytes only; this program never binds a listener or touches XCTest.
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 
 // Device-library diagnostics must never corrupt the binary pipe or expose IDs.
 for (const method of ['log', 'info', 'warn', 'error', 'debug']) console[method] = () => {};
@@ -9,6 +12,28 @@ if (!/^[A-Za-z0-9-]{8,64}$/.test(udid ?? '') || !/^\d+$/.test(portArgument)) pro
 const devicePort = Number(portArgument);
 if (!Number.isInteger(devicePort) || devicePort < 1024 || devicePort > 65535) process.exit(1);
 
+const stateDir = process.env.IPHONE_USE_STATE_DIR || path.join(os.homedir(), '.local/share/iphone-use');
+const pidFile = path.join(stateDir, `screen-stream-${devicePort}.pid`);
+
+try {
+  if (fs.existsSync(pidFile)) {
+    const oldPid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+    if (oldPid && oldPid !== process.pid) {
+      try { process.kill(oldPid, 'SIGTERM'); } catch {}
+    }
+  }
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(pidFile, String(process.pid));
+} catch {}
+
+function cleanPid() {
+  try {
+    if (fs.existsSync(pidFile) && fs.readFileSync(pidFile, 'utf8').trim() === String(process.pid)) {
+      fs.unlinkSync(pidFile);
+    }
+  } catch {}
+}
+
 let socket, request, response, agent;
 let stopping = false;
 const startup = setTimeout(() => stop(1), 5000);
@@ -16,6 +41,7 @@ function stop(code = 0) {
   if (stopping) return;
   stopping = true;
   clearTimeout(startup);
+  cleanPid();
   response?.destroy();
   request?.destroy();
   socket?.destroy();
