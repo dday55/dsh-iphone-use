@@ -38,12 +38,19 @@ window.__ModuleLoader__.load({
     // reload of this page but clears when the browser tab/window goes away.
     const CLOSED_PREFIX = "dsh-iphone-use.preview-closed:";
 
-    // Is a preview tab mounted right now? Sidebar tabs are real DOM nodes, so the
-    // mounted subtree is the only honest "this Session shows the preview" signal.
-    function previewTabMounted() {
+    // Is a preview tab mounted for THIS Session? Sidebar tabs are real DOM nodes,
+    // so the mounted subtree is the only honest "this Session shows the preview"
+    // signal — but Desktop keeps inactive Browser tabs mounted (`keepMounted`), so
+    // a global "any preview frame exists" check would treat another Session's hidden
+    // tab as this Session's and never open anything here.
+    function previewTabMounted(sessionId) {
       for (const node of document.querySelectorAll("iframe, webview")) {
         const src = node.getAttribute("src") || node.src || "";
-        if (PREVIEW_URL.test(src)) return true;
+        if (!PREVIEW_URL.test(src)) continue;
+        if (!sessionId) return true;
+        const owner = node.closest("[data-sidebar-right-session]");
+        if (!owner) return true;
+        if (owner.dataset.sidebarRightSession === sessionId) return true;
       }
       return false;
     }
@@ -221,7 +228,7 @@ window.__ModuleLoader__.load({
         }
 
         const sessionId = currentSessionId();
-        const mounted = previewTabMounted();
+        const mounted = previewTabMounted(sessionId);
 
         // Mounted -> unmounted inside the same Session is the user closing the
         // tab. Switching Sessions changes the id, so it is never mistaken for a
@@ -302,7 +309,7 @@ window.__ModuleLoader__.load({
       const onSessionishEvent = () => {
         if (cancelled) return;
         idlePolls = 0;
-        if (previewTabMounted()) return;
+        if (previewTabMounted(currentSessionId())) return;
         confirmed = false;
         unconfirmed = 0;
         schedule(300);
