@@ -95,9 +95,15 @@ window.__ModuleLoader__.load({
       // Progressive poll backoff counter for idle sessions.
       let idlePolls = 0;
 
-      // The Session whose pane is on screen. The selected sidebar row carries it
-      // as `data-row-key="session:<id>"`, which survives Session switches.
+      // The Session whose pane is on screen. Check sidebarRight's mounted store
+      // directly first (authoritative in Desktop and Web), then fall back to DOM.
       const currentSessionId = () => {
+        try {
+          const sid = ctx.sidebarRight.mounted?.getSnapshot?.();
+          if (typeof sid === "string" && sid) return sid;
+        } catch {
+          // Fall through.
+        }
         try {
           const selected = document.querySelector('[data-row-key^="session:"][aria-selected="true"]');
           const key = selected?.getAttribute("data-row-key") ?? "";
@@ -154,6 +160,17 @@ window.__ModuleLoader__.load({
       const attempt = async () => {
         if (cancelled) return;
 
+        if (!url) {
+          url = await findPreview();
+          if (cancelled) return;
+          if (!url) {
+            // The host half is not listening yet (bundle still activating).
+            schedule(RETRY_MS);
+            return;
+          }
+          report("client-connected");
+        }
+
         const sessionId = currentSessionId();
         const mounted = previewTabMounted();
 
@@ -195,16 +212,6 @@ window.__ModuleLoader__.load({
         if (wasClosed(sessionId)) {
           schedule(WATCH_MS);
           return;
-        }
-
-        if (!url) {
-          url = await findPreview();
-          if (cancelled) return;
-          if (!url) {
-            // The host half is not listening yet (bundle still activating).
-            schedule(RETRY_MS);
-            return;
-          }
         }
 
         // The only trigger: iPhone Use was used in this Session. A conversation
