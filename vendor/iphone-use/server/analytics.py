@@ -151,8 +151,11 @@ def project_token():
 
 
 def opted_out():
-    return (os.environ.get("IPHONE_USE_ANALYTICS", "").lower() in ("0", "false", "off", "no")
-            or os.environ.get("DO_NOT_TRACK", "").lower() in ("1", "true"))
+    # Strict opt-in: telemetry is completely disabled by default.
+    # It only runs if explicitly set to "1" or "true", and DO_NOT_TRACK is not set.
+    val = os.environ.get("IPHONE_USE_ANALYTICS", "0").lower()
+    dnt = os.environ.get("DO_NOT_TRACK", "").lower()
+    return val not in ("1", "true") or dnt in ("1", "true")
 
 
 def environment():
