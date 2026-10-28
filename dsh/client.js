@@ -64,6 +64,45 @@ window.__ModuleLoader__.load({
       return null;
     }
 
+    // Fire-and-forget beacon to whichever preview server answers. Used before the
+    // plugin knows its own URL, so load-time failures stay observable.
+    async function beacon(event, extra) {
+      for (const port of PORTS) {
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/health`, { cache: "no-store" });
+          if (!response.ok) continue;
+          const health = await response.json();
+          if (!health || typeof health !== "object" || !("frame_seq" in health)) continue;
+          await fetch(`http://127.0.0.1:${port}/client-report`, {
+            method: "POST",
+            headers: { "content-type": "text/plain" },
+            body: JSON.stringify({ event, at: Date.now(), href: location.href, ...extra }),
+            keepalive: true,
+            cache: "no-store",
+          }).catch(() => {});
+          return;
+        } catch {
+          // Keep probing the next candidate port.
+        }
+      }
+    }
+
+    // Evaluation beacon: proves the page actually downloaded and ran this file.
+    // Without it, `client: null` cannot tell "script never loaded" apart from
+    // "script ran but apply() was never called (inject waited forever)".
+    {
+      let bootIds = null;
+      try {
+        bootIds = (window.__DSH_BOOT__?.entries ?? []).map((entry) => entry.id);
+      } catch {
+        bootIds = null;
+      }
+      beacon("module-evaluated", {
+        in_boot: Array.isArray(bootIds) ? bootIds.includes("dsh-iphone-use") : null,
+        boot_size: Array.isArray(bootIds) ? bootIds.length : null,
+      });
+    }
+
     async function sessionUsed(base, sessionId) {
       if (!sessionId) return false;
       try {
@@ -77,6 +116,16 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      try {
+        beacon("apply-entered");
+        return runApply(ctx);
+      } catch (error) {
+        beacon("apply-threw", { error: String(error?.message ?? error) });
+        throw error;
+      }
+    }
+
+    function runApply(ctx) {
       let cancelled = false;
       let timer;
       let url = null;
