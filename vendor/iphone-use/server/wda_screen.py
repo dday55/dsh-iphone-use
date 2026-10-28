@@ -291,6 +291,39 @@ class ScreenHub:
     def paused(self):
         return self._paused()
 
+    def recent_frame(self, max_age_seconds=0.8):
+        """Return the latest frame if recent, from memory or shared stream cache."""
+        with self._lock:
+            if self._frame and self._received_at and (time.monotonic() - self._received_at) <= max_age_seconds:
+                if not self._paused():
+                    return {
+                        "jpeg": self._frame["_jpeg"],
+                        "width": self._frame["width"],
+                        "height": self._frame["height"],
+                        "age": time.monotonic() - self._received_at,
+                        "source": "memory",
+                    }
+        # Check shared cache from sibling process (e.g. preview server)
+        try:
+            meta_path = self.state_dir / "screen-live.json"
+            img_path = self.state_dir / "screen-live.jpg"
+            if meta_path.is_file() and img_path.is_file():
+                meta = json.loads(meta_path.read_text())
+                age = time.time() - meta.get("time", 0)
+                if age <= max_age_seconds and not self._paused():
+                    raw = img_path.read_bytes()
+                    if raw.startswith(b"\xff\xd8"):
+                        return {
+                            "jpeg": raw,
+                            "width": meta.get("width", 0),
+                            "height": meta.get("height", 0),
+                            "age": age,
+                            "source": "shared_stream",
+                        }
+        except (OSError, ValueError):
+            pass
+        return None
+
     def restart(self):
         """Drop the stream and its last frame; the next visible poll reconnects as a new stream."""
         self.close()
@@ -401,12 +434,36 @@ class ScreenHub:
             # A close/pause racing the read must not repopulate cleared pixels.
             if stop.is_set():
                 return
-            self._received_at = time.monotonic()
+            now = time.monotonic()
+            self._received_at = now
             if self._frame and self._frame.get("_jpeg") == raw:
                 return
             self._seq += 1
             self._frame = {"seq": self._seq, "_jpeg": raw,
                            "mimeType": "image/jpeg", "width": width, "height": height}
+            if not hasattr(self, "_last_disk_frame_at") or (now - self._last_disk_frame_at) >= 0.1:
+                self._last_disk_frame_at = now
+                self._save_shared_frame(raw, width, height, self._seq)
+
+    def _save_shared_frame(self, raw, width, height, seq):
+        try:
+            target = self.state_dir / "screen-live.jpg"
+            meta_target = self.state_dir / "screen-live.json"
+            fd, tmp = tempfile.mkstemp(prefix=".screen-live-", dir=self.state_dir)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(raw)
+                os.replace(tmp, target)
+            finally:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+            meta = json.dumps({"seq": seq, "width": width, "height": height, "time": time.time()})
+            tmp_meta = self.state_dir / f".screen-meta-{seq}.tmp"
+            tmp_meta.write_text(meta)
+            os.replace(tmp_meta, meta_target)
+        except (OSError, ValueError):
+            pass
 
     def _command(self):
         try:

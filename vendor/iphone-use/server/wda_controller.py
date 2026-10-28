@@ -147,6 +147,42 @@ def contains(outer,inner,slack=1):
             and inner["y"]+inner["height"]<=outer["y"]+outer["height"]+slack)
 
 
+GENERIC_CONTAINERS = {"XCUIElementTypeOther", "XCUIElementTypeGroup"}
+
+
+def prune_nodes(nodes):
+    """Prune redundant generic containers (Other, Group) that duplicate the
+    geometry and text of specific actionable/content child elements (Button, StaticText, etc.).
+    """
+    if len(nodes) <= 1:
+        return nodes
+    specific = {}
+    for n in nodes:
+        t = n.get("type", "")
+        if t not in GENERIC_CONTAINERS:
+            text = n.get("label") or n.get("name")
+            if text:
+                r = n.get("rect", {})
+                key = (text, round(r.get("x", 0)), round(r.get("y", 0)), round(r.get("width", 0)), round(r.get("height", 0)))
+                specific[key] = n
+
+    if not specific:
+        return nodes
+
+    result = []
+    for n in nodes:
+        t = n.get("type", "")
+        if t in GENERIC_CONTAINERS:
+            text = n.get("label") or n.get("name")
+            if text:
+                r = n.get("rect", {})
+                key = (text, round(r.get("x", 0)), round(r.get("y", 0)), round(r.get("width", 0)), round(r.get("height", 0)))
+                if key in specific:
+                    continue
+        result.append(n)
+    return result
+
+
 class PhoneController:
     def __init__(self, client, state_dir):
         self.client, self.state_dir = client, Path(state_dir)
@@ -310,7 +346,7 @@ class PhoneController:
         if self.snapshot_restore:self.snapshot_restore({})
         return result
 
-    def observe(self,mode="tree",include_invisible=False,max_nodes=DEFAULT_MAX_NODES,expensive_visibility=False,snapshot_max_depth=None,snapshot_max_children=None):
+    def observe(self,mode="tree",include_invisible=False,max_nodes=DEFAULT_MAX_NODES,expensive_visibility=False,snapshot_max_depth=None,snapshot_max_children=None,prune=True,allow_stream_cache=True):
         if mode not in ("tree","screenshot","both"):
             fail("invalid_argument","mode must be tree, screenshot or both.")
         integer(max_nodes,"max_nodes",1,500)
@@ -326,26 +362,50 @@ class PhoneController:
             nodes,viewport=(self.bounded_tree(include_invisible,expensive_visibility,limits) if limits
                             else self.tree(include_invisible,expensive_visibility))
             app=self._source_app or self.active_app()
-        result=self.observation_from_state(nodes,viewport,app,mode,max_nodes,expensive_visibility)
+        if prune and nodes:
+            nodes=prune_nodes(nodes)
+        result=self.observation_from_state(nodes,viewport,app,mode,max_nodes,expensive_visibility,pruned=prune,allow_stream_cache=allow_stream_cache)
         if limits:
             result.update(snapshot_limits=limits,tree_complete=False,truncated=True,total_nodes_scope="bounded_snapshot")
             result.setdefault("warnings",[]).append("Native depth/child limits apply before snapshot creation, not by visible area. Controls or visible rows may be omitted; missing nodes do not prove absence or list completeness. Inspect a screenshot.")
         return result
 
-    def observation_from_state(self,nodes,viewport,app,mode,max_nodes=DEFAULT_MAX_NODES,expensive_visibility=False):
+    def observation_from_state(self,nodes,viewport,app,mode,max_nodes=DEFAULT_MAX_NODES,expensive_visibility=False,pruned=False,allow_stream_cache=True):
         result={"observation_id":self.remember(nodes,viewport,app,has_tree=mode!="screenshot"),
                 "observed_at":dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),"app":app,"viewport":viewport}
         if mode in ("tree","both"):
             result.update({"nodes":[compact_node(node) for node in nodes[:max_nodes]],"total_nodes":len(nodes),"truncated":len(nodes)>max_nodes})
             if expensive_visibility:result["visibility_computed"]=True
+            if pruned:result["pruned"]=True
             if not nodes:
                 result["warnings"]=["Empty accessibility tree: inspect a screenshot for lock, iPhone Mirroring conflict, loading, or custom-rendered content before acting."]
         if mode in ("screenshot","both"):
-            result["image"]=self.capture(viewport)
+            result["image"]=self.capture(viewport,allow_cached_stream=allow_stream_cache)
         return result
 
-    def capture(self,viewport):
-        """Native PNG kept as evidence; the model receives a bounded image with its exact point scale."""
+    def capture(self,viewport,allow_cached_stream=True):
+        """Native PNG kept as evidence; the model receives a bounded image with its exact point scale.
+        When a live stream is running, reuses the fresh cached frame to avoid a slow roundtrip."""
+        if allow_cached_stream and getattr(self, "screen", None):
+            try:
+                recent = self.screen.recent_frame(max_age_seconds=0.8)
+                if recent and recent.get("jpeg"):
+                    artifacts=self.state_dir/"artifacts";artifacts.mkdir(mode=0o700,parents=True,exist_ok=True)
+                    dest=artifacts/(dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")+"-"+uuid.uuid4().hex[:8]+".jpg")
+                    dest.write_bytes(recent["jpeg"]);dest.chmod(0o600)
+                    width, height = recent.get("width") or 0, recent.get("height") or 0
+                    if width and height and (width>height)!=(viewport["width"]>viewport["height"]):
+                        viewport.update(self.viewport())
+                    for pattern in ("*.png","*.jpg"):
+                        for old in sorted(artifacts.glob(pattern))[:-100]:
+                            old.unlink()
+                    image={"path":str(dest),"mimeType":"image/jpeg","cached_stream":True}
+                    if width and height:
+                        image.update(width=width,height=height,pixel_to_point=[round(viewport["width"]/width,4),round(viewport["height"]/height,4)])
+                    return image
+            except Exception:
+                pass
+
         encoded=self.client.request("GET","/screenshot").get("value")
         try:
             data=base64.b64decode(encoded,validate=True)

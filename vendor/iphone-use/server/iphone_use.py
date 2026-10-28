@@ -75,7 +75,8 @@ REGION["description"]="Scroll rectangle in iPhone points, not screenshot pixels.
 SCHEMAS={
  "observe":obj({"mode":string("Standalone output, default tree; actions use observe.",enum=["tree","screenshot","both"]),"include_invisible":BOOL,"max_nodes":{**num(1,500,"integer"),"default":DEFAULT_MAX_NODES},"expensive_visibility":BOOL,
      "snapshot_max_depth":{**num(1,100,"integer"),"description":"Native depth cap. Incomplete, not visible-only; tree/both only."},
-     "snapshot_max_children":{**num(1,500,"integer"),"description":"Native per-parent child cap. May omit visible rows; tree/both only."}}),
+     "snapshot_max_children":{**num(1,500,"integer"),"description":"Native per-parent child cap. May omit visible rows; tree/both only."},
+     "prune":{"type":"boolean","description":"Prune redundant container wrappers and identical-boundary duplicates to save tokens."},"allow_stream_cache":{"type":"boolean","description":"Reuse a fresh frame from the active preview stream instead of a slow native roundtrip."}}),
  "find":obj({"selector":SEL,"limit":num(1,30,"integer")},("selector",)),
  "tap":obj({"selector":SEL,"x":num(0,10000),"y":num(0,10000),"observation_id":string("Optional ID from this Runtime. Checks app/viewport context, not whole-page pixel equality or age."),**EXPECT}),
  "swipe":obj({"direction":string("Finger movement; up usually reveals later rows. Default up.",enum=["up","down","left","right"]),"region":REGION,"observation_id":string("Optional ID from this Runtime; checks app/viewport context, not numeric/carousel text changes or age."),"expect":SEL,"verify":{**VERIFY,"description":"False: one gesture, no XML checks. True: check anchor movement once; failure returns a screenshot before another action. Numeric refresh is not progress."},"max_attempts":{**num(1,2,"integer"),"default":1,"description":"Legacy limit; even 2 stops after the first unproven gesture for screenshot inspection."},"observe":OBS}),
