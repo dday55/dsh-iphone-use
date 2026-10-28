@@ -144,11 +144,16 @@ export function createPreviewServer(options = {}) {
     return result;
   }
 
+  // The Desktop shell renders the app from its own privileged scheme
+  // (`dsh-app://app`), so its client plugin is a *legitimate* cross-origin
+  // caller of /health and /client-report. Only public web origins are hostile.
   function isTrustedOrigin(origin) {
-    if (!origin) return true;
+    if (!origin) return true; // same-origin, curl, server-to-server
+    if (origin === "null") return true; // sandboxed/opaque shell frame
     try {
       const parsed = new URL(origin);
-      return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+      if (parsed.protocol === "dsh-app:") return true;
+      return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]";
     } catch {
       return false;
     }
