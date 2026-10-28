@@ -49,6 +49,13 @@ SNAPSHOT_FILES = (
 SNAPSHOT_DIRS = ("server", "skills")
 
 
+def _extract_all(tar: tarfile.TarFile, target: Path) -> None:
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(target, filter="data")
+    else:
+        tar.extractall(target)
+
+
 def local_source(source: Path, ref: str) -> Path:
     if not (source / ".git").exists():
         raise SystemExit(f"not a git checkout: {source}")
@@ -58,7 +65,7 @@ def local_source(source: Path, ref: str) -> Path:
         check=True, capture_output=True,
     ).stdout
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        tar.extractall(target)
+        _extract_all(tar, target)
     return target
 
 
@@ -66,7 +73,7 @@ def remote_source(ref: str) -> Path:
     target = Path(tempfile.mkdtemp(prefix="iphone-use-sync-"))
     data = urllib.request.urlopen(CODELOAD + ref, timeout=60).read()
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
-        tar.extractall(target)
+        _extract_all(tar, target)
     inner = next(path for path in target.iterdir() if path.is_dir())
     return inner
 

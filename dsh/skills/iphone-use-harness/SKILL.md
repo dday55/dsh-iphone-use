@@ -18,7 +18,7 @@ whenToUse: 任务涉及用 pua_* MCP 工具操作真实 iPhone，或需要判断
 
 Harness 不渲染 MCP App（`ui://` 资源）面板，因此：
 
-- 不要调用 `pua_screen`、`pua_screen_frame`、`pua_screen_action`。它们是给 Codex 的预览 App 用的，在 Harness 下不会出现画面，只会多花一个回合。
+- 不要调用 `pua_screen_frame`、`pua_screen_action`。它们是给前端预览页面内部轮询与触控用的，模型不需要也不应直接调用它们。
 - 需要看手机画面时用 `pua_observe(mode="screenshot")`（或 `mode="both"`）；需要判断界面异常时同样先看这张图。
 - `pua_ready` 返回里的 `preview` 字段是预览状态，不是模型观察；不要因为 `preview` 为空或 `paused` 去恢复通道。
 - 实时画面服务随 bundle 启动（默认 `http://127.0.0.1:18760`），但**只有用过 iPhone Use 的会话**才会在右侧栏自动出现 Browser 标签。手机 READY 之后调用一次 `iphone_preview`：它会给当前会话打上「用过」标记（从而让预览自动出现），并返回地址。没用过的会话不会自己弹预览。用户说没看到时也调用它确认一次。那是给人看的，不改变模型的观察方式；两边共用 `screen-state.json`，所以 `pua_screen(action="pause")` 会让预览同时盖上暂停遮罩。
@@ -27,9 +27,11 @@ Harness 不渲染 MCP App（`ui://` 资源）面板，因此：
 
 ## 3. 请用户接管用 ask_user_question
 
-`iphone-use` 里写的宿主提问工具在 Harness 是 `ask_user_question`：一次一个问题，选项写进 `options`，首个选项固定「已完成继续」，第二个可为「暂时无法完成」。异步返回、预选或超时都不是用户答复；收到用户实际选择「已完成继续」后再取新观察继续任务。
-
-Harness 下没有预览可暂停，认证接管时直接停止手机动作、读取与截图，等用户完成即可；不需要调用 `pua_screen(action="pause"/"resume")`。
+App 密码或 Face ID 等安全场景需要用户接管时：
+1. 先调用一次 `pua_screen(action="pause")`，使右侧栏的实时预览同步盖上隐私遮罩，避免敏感信息外露；
+2. 用 `ask_user_question` 提问：一次一个问题，选项写进 `options`，首个选项固定「已完成继续」，第二个可为「暂时无法完成」；
+3. 暂停所有手机操作与截图，等待用户在真机上操作；异步返回、预选或超时都不是用户答复；
+4. 收到用户实际选择「已完成继续」后，调用一次 `pua_screen(action="resume")` 恢复预览，再取新观察（`pua_observe`）继续任务。
 
 ## 4. MCP 起不来时先看是不是沙箱
 

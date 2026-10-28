@@ -5,6 +5,16 @@
   "description": "DeepSeek Harness bundle for iPhone Use: pua_* MCP tools, the iphone-use skills, and a live screen preview.",
   "license": "MIT",
   "type": "module",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "iphone",
+    "ios",
+    "mcp",
+    "webdriveragent",
+    "automation",
+    "phone-use-agent"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/dday55/dsh-iphone-use.git"
