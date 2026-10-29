@@ -28,4 +28,4 @@ npm run build --prefix ui
 python3 scripts/check_screen_ui.py
 ```
 
-UI 不依赖 CDN 或远程字体；服务端预览依赖的 USB 流脚本与 `tooling/` 依赖清单也随插件提供。`docs/` 与 `evals/` 为本地开发资料，不是运行时依赖。
+UI 不依赖 CDN 或远程字体；服务端预览的 USB 通道由插件自带的纯 Python usbmux 实现（`server/usbmux.py`），不需要 Node 或 npm 依赖。`docs/` 与 `evals/` 为本地开发资料，不是运行时依赖。

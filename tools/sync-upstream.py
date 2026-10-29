@@ -2,7 +2,7 @@
 """Refresh ``vendor/iphone-use`` from the upstream iPhone Use repository.
 
 This bundle carries a snapshot of the upstream runtime (MCP server, skills,
-widget page, USB tooling) so that a git install needs nothing else. Update it
+widget page) so that a git install needs nothing else. Update it
 deliberately:
 
     python3 tools/sync-upstream.py --ref v0.3.16          # from GitHub
@@ -40,10 +40,6 @@ SNAPSHOT_FILES = (
     "plugin.json",
     "assets/phone-screen.html",
     "assets/icon.svg",
-    "tooling/forward.mjs",
-    "tooling/screen-stream.mjs",
-    "tooling/package.json",
-    "tooling/package-lock.json",
     "scripts/smoke_mcp.py",
 )
 SNAPSHOT_DIRS = ("server", "skills")

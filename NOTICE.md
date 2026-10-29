@@ -17,6 +17,6 @@ iPhone Use itself controls a real iPhone through
 signed locally on first use with the user's own Apple developer account. No WDA
 binaries are redistributed here.
 
-Upstream also ships its own third-party notices for the widget and tooling
+Upstream also ships its own third-party notices for the widget page
 dependencies; see the upstream repository's `THIRD_PARTY_NOTICES.md` when you
 need the full list.
