@@ -51,7 +51,7 @@ SDK 支持。
 在全新 profile 里 `dsh plugin add <repo>`（本地路径与 `git+file://` 都试过）：
 
 - `iphone-use` 进入 `dsh.profile.bundles`
-- `node_modules/` 里的副本包含 `vendor/iphone-use/server`、`skills`、`assets`、`tooling`
+- `node_modules/` 里的副本包含 `vendor/iphone-use/server`、`skills`、`assets`
 - 启动后工具可调、技能可加载，**没有任何路径需要手工修改**
 
 ## 2. Codex 专属 vs Harness 对等物
@@ -142,6 +142,38 @@ Codex 的预览是一个 MCP App：`assets/phone-screen.html` 用 postMessage �
 2. `client_boot.has_self` 为 false → 插件没进启动清单（安装或包解析问题）
 3. `client_bundle.status !== 200` 或 `has_module: false` → 宿主发不出客户端 JS
 4. 两者都正常但 `client: null` → 页面侧没执行：优先怀疑上面两条（origin 被挡 / 页面没重载）
+
+## 3.2 代码分层与离线验证
+
+`vendor/iphone-use/server/` 的纯逻辑已经和传输/状态分离，模型看到的节点形状、剪枝规则、
+选择器转义、手势几何都可以不接手机直接验证：
+
+| 模块 | 职责 |
+| --- | --- |
+| `iphone_use.py` | stdio/JSON-RPC 运行时与工具分发 |
+| `wda_controller.py` | 手势、输入、选择器命中（`PhoneController`） |
+| `observe.py` | 观察与截图编码（`ObservationMixin`） |
+| `tree.py` | XML → 节点、`compact_node`、`prune_nodes`、`tree_digest` |
+| `selector.py` | 选择器校验 + NSPredicate 转义 |
+| `actions.py` | 默认滚动区域与安全区夹取 |
+| `schemas.py` / `instructions.py` | 工具契约与 initialize 文案 |
+| `obslog.py` | 结构化 stderr（一行一个 JSON，不含选择器/输入内容/设备标识） |
+
+```sh
+python3 -m unittest discover -s tests -p "test_*.py"   # 52 项，无需真机
+```
+
+本轮一并修掉的行为问题（都有对应测试）：
+
+- **粘贴必须自证**：长文本走剪贴板后无条件读回字段值；不一致就清空字段回退逐字输入，
+  读不到值则如实标记为未验证，而不是默认"已输入"。剪贴板用完恢复原内容。
+- **写操作不再重发**：死连接只对只读请求重连重试；写请求失败一律 `action_uncertain`，
+  避免重复点击/重复提交。
+- **等待改为自适应**：动作后的观察先 0.12s 起步，只有树指纹与动作前相同才补读一次，
+  不再固定 sleep 0.5s。
+- **快照设置读一次**：`bounded_tree` 复用已读到的 WDA 默认值，重复调用少一次往返。
+- **截图只留交付的那份**：原生 PNG 先落在临时目录，转成 JPEG 后删除，`artifacts/` 不再
+  每步同时囤 PNG 与 JPEG。
 
 ## 4. 沙箱：只有 CLI 从受限终端启动时才会踩
 

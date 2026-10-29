@@ -75,12 +75,33 @@ dsh/preview/                 # MCP App 补位宿主（iframe + ui/initialize + t
 dsh/skills/iphone-use-harness/SKILL.md
 vendor/iphone-use/           # 上游快照 + UPSTREAM.json（commit / 版本）
 tools/sync-upstream.py       # 更新快照或 --check
+tests/                       # 离线测试（不需要真机）
+```
+
+`vendor/iphone-use/server/` 现在分成几层，纯逻辑不再混在执行流里：
+
+```
+iphone_use.py    # stdio/JSON-RPC 运行时与工具分发
+wda_controller.py# 手势、输入、选择器命中
+observe.py       # 观察与截图编码（模型看到的东西）
+tree.py          # XML -> 节点、剪枝、指纹（纯函数）
+selector.py      # 选择器校验 + NSPredicate 转义（纯函数）
+actions.py       # 手势几何与安全区夹取（纯函数）
+schemas.py       # 工具参数契约与描述
+instructions.py  # initialize 时的说明文本
+obslog.py        # 结构化 stderr 事件（一行一个 JSON）
 ```
 
 细节、实测记录与踩坑见 [dsh/HARNESS.md](dsh/HARNESS.md)。更新上游：
 
 ```sh
 python3 tools/sync-upstream.py --ref v0.3.17   # 或 --source <本地克隆>；--check 校验
+```
+
+离线测试（不需要手机、不需要 WDA）：
+
+```sh
+python3 -m unittest discover -s tests -p "test_*.py"
 ```
 
 ## 已知限制
