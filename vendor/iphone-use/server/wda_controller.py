@@ -11,14 +11,18 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from urllib.parse import quote
+from actions import contains_rect, default_region, swipe_points
+from constants import CANDIDATE_LIMIT, DEFAULT_MAX_NODES, VIEWPORT_TTL
+from observe import ObservationMixin
+from primitives import action_result, fail, finite, integer, stale
+from selector import predicate
+from tree import compact_node, contains, parse_source, prune_nodes, tree_digest
 from wda_client import WDAError
 import wda_image
 from wda_text import request_timeout, split_text
 
 ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
-TYPE_PREFIX = "XCUIElementType"
 EDITABLE = ("XCUIElementTypeTextField","XCUIElementTypeSearchField","XCUIElementTypeTextView")
-SELECTOR_FIELDS = {"label","label_contains","name","value","type","enabled","predicate","index"}
 # Rects of this many matches are read one by one when WDA answers with bare element IDs.
 CANDIDATE_LIMIT = 8
 # Bounds checks reuse the viewport briefly; an observation or a supplied ID reads it again.
@@ -75,115 +79,7 @@ def action_result(function):
     return wrapped
 
 
-def predicate_literal(value):
-    # NSPredicate rejects literal line breaks inside quoted strings. Its Unicode
-    # escapes preserve exact text, including a literal backslash followed by n.
-    return "".join("\\\\" if c=="\\" else "\\'" if c=="'" else f"\\u{ord(c):04x}" if ord(c)<32 or ord(c)==127 or c in "\u2028\u2029" else c for c in value)
-
-
-def predicate(selector):
-    if not isinstance(selector,dict) or not selector or set(selector)-SELECTOR_FIELDS:
-        fail("invalid_selector", "Use label/label_contains/name/value/type/enabled, or a standalone PUA predicate; index picks one match.")
-    if "index" in selector:
-        index=selector["index"]
-        if isinstance(index,bool) or not isinstance(index,int) or not 0 <= index <= 199:
-            fail("invalid_selector","index must be an integer 0..199 choosing one match in tree order.")
-    criteria={key:value for key,value in selector.items() if key!="index"}
-    if not criteria:
-        fail("invalid_selector","index only chooses among matches; add label, name, value, type or a predicate.")
-    if "predicate" in criteria:
-        if len(criteria)!=1:
-            fail("invalid_selector", "predicate cannot be mixed with exact fields.")
-        result = criteria["predicate"]
-        if not isinstance(result,str) or not 1 <= len(result) <= 2000:
-            fail("invalid_selector", "predicate must have 1..2000 characters.")
-        return result
-    clauses=[]
-    for key,value in criteria.items():
-        if key=="enabled":
-            if not isinstance(value,bool) and value not in ("true","false"):
-                fail("invalid_selector","enabled must be a boolean or the exact tree string true/false.")
-            literal="true" if value is True or value=="true" else "false"
-            clauses.append("enabled == "+literal)
-            continue
-        if not isinstance(value,str) or not 1 <= len(value) <= 1000:
-            fail("invalid_selector", "Selector fields must be nonempty strings up to 1000 characters.")
-        if "\x00" in value:
-            fail("invalid_selector", "Exact selector strings cannot contain NUL; NSPredicate cannot match that character reliably.")
-        if key=="type" and not value.startswith("XCUIElementType"):
-            value="XCUIElementType"+value
-        escaped=predicate_literal(value)
-        clauses.append(f"label CONTAINS '{escaped}'" if key=="label_contains" else f"{key} == '{escaped}'")
-    return " AND ".join(clauses)
-
-
-def short_type(kind):
-    return kind[len(TYPE_PREFIX):] if isinstance(kind,str) and kind.startswith(TYPE_PREFIX) else kind
-
-
-def compact_node(node):
-    """Model-facing node: short type, each distinct text once, integer [x,y,width,height].
-
-    Omitted fields carry their defaults: name equals label, value repeats the text,
-    enabled and visible are true, and the node intersects the viewport.
-    """
-    result={}
-    if node.get("type"):result["type"]=short_type(node["type"])
-    label,name,value=node.get("label"),node.get("name"),node.get("value")
-    if label:result["label"]=label
-    if name and name!=label:result["name"]=name
-    if value and value!=(label or name):result["value"]=value
-    if node.get("enabled") in ("false",False):result["enabled"]=False
-    if node.get("visible") in ("false",False):result["visible"]=False
-    if node.get("in_viewport") is False:result["in_viewport"]=False
-    rect=node.get("rect")
-    if rect:result["rect"]=[round(rect[key]) for key in ("x","y","width","height")]
-    return result
-
-
-def contains(outer,inner,slack=1):
-    return (outer["x"]-slack<=inner["x"] and outer["y"]-slack<=inner["y"]
-            and inner["x"]+inner["width"]<=outer["x"]+outer["width"]+slack
-            and inner["y"]+inner["height"]<=outer["y"]+outer["height"]+slack)
-
-
-GENERIC_CONTAINERS = {"XCUIElementTypeOther", "XCUIElementTypeGroup"}
-
-
-def prune_nodes(nodes):
-    """Prune redundant generic containers (Other, Group) that duplicate the
-    geometry and text of specific actionable/content child elements (Button, StaticText, etc.).
-    """
-    if len(nodes) <= 1:
-        return nodes
-    specific = {}
-    for n in nodes:
-        t = n.get("type", "")
-        if t not in GENERIC_CONTAINERS:
-            text = n.get("label") or n.get("name")
-            if text:
-                r = n.get("rect", {})
-                key = (text, round(r.get("x", 0)), round(r.get("y", 0)), round(r.get("width", 0)), round(r.get("height", 0)))
-                specific[key] = n
-
-    if not specific:
-        return nodes
-
-    result = []
-    for n in nodes:
-        t = n.get("type", "")
-        if t in GENERIC_CONTAINERS:
-            text = n.get("label") or n.get("name")
-            if text:
-                r = n.get("rect", {})
-                key = (text, round(r.get("x", 0)), round(r.get("y", 0)), round(r.get("width", 0)), round(r.get("height", 0)))
-                if key in specific:
-                    continue
-        result.append(n)
-    return result
-
-
-class PhoneController:
+class PhoneController(ObservationMixin):
     def __init__(self, client, state_dir):
         self.client, self.state_dir = client, Path(state_dir)
         self.snapshots=collections.OrderedDict()
@@ -198,6 +94,11 @@ class PhoneController:
         self.pending_input=None
         self.last_target=None
         self.snapshot_restore=None
+        self._snapshot_defaults=None
+        # None = the fast clipboard path did not run; True/False = its readback verdict.
+        self.paste_verified=None
+        self._observed_digest=None
+        self._pre_action_digest=None
         self.typing_frequency=TYPING_FREQUENCY
         self.typing_piece=TYPING_PIECE
         self.call_budget=CALL_BUDGET
@@ -214,6 +115,7 @@ class PhoneController:
         """Forget context tied to a PUA session that was closed or replaced."""
         self.snapshots.clear()
         self._viewport_cache=None
+        self._snapshot_defaults=None
         self.pending_input=None
 
     def screen_event(self,kind,**kwargs):
@@ -229,6 +131,7 @@ class PhoneController:
             self.screen_event("tap",point=self._screen_targets[path[:-6]])
         elif path=="/wda/dragfromtoforduration":
             self.screen_event("drag",**{"from_point":{"x":payload["fromX"],"y":payload["fromY"]},"to_point":{"x":payload["toX"],"y":payload["toY"]},"duration_ms":max(300,min(3000,int((payload.get("duration",0)+.35)*1000)))})
+        self._pre_action_digest = getattr(self,"_observed_digest",None)
         result=self.client.session("POST",path,payload,timeout=timeout) if session else self.client.request("POST",path,payload,timeout=timeout)
         self.accepted_actions+=1
         return result
@@ -278,33 +181,21 @@ class PhoneController:
         if not isinstance(raw,str):
             fail("invalid_response", "PUA source is not XML text.")
         try:
-            tree=ET.fromstring(raw)
+            root,elements=parse_source(raw)
         except ET.ParseError as exc:
             fail("invalid_response", f"PUA XML parse failed: {exc}.")
-        root=tree.attrib if tree.attrib.get("type")=="XCUIElementTypeApplication" else {}
         # The page source root names the foreground app and spans the screen, so one read
         # usually answers what activeAppInfo and window/size would be asked separately.
         bundle=root.get("bundleId")
         self._source_app=bundle if isinstance(bundle,str) and bundle and not bundle.startswith("local.pid.") else None
         viewport=self.source_viewport(root)
         nodes=[]
-        for element in tree.iter():
-            a=element.attrib
-            if not any(a.get(k) for k in ("label","name","value")) and a.get("type") not in ("XCUIElementTypeAlert","XCUIElementTypeSheet"):
-                continue
-            try:
-                rect={k:float(a.get(k,0)) for k in ("x","y","width","height")}
-            except ValueError:
-                continue
-            if not all(math.isfinite(n) for n in rect.values()):
-                continue
+        for node in elements:
+            rect=node["rect"]
             intersects=rect["width"]>0 and rect["height"]>0 and rect["x"]<viewport["width"] and rect["y"]<viewport["height"] and rect["x"]+rect["width"]>0 and rect["y"]+rect["height"]>0
-            if not include_invisible and (not intersects or a.get("visible")=="false"):
+            if not include_invisible and (not intersects or node.get("visible")=="false"):
                 continue
-            if a.get("type") in ("XCUIElementTypeApplication","XCUIElementTypeWindow"):
-                continue
-            node={k:a[k] for k in ("type","name","label","value","enabled","visible") if k in a}
-            node["rect"]=rect;node["in_viewport"]=intersects
+            node["in_viewport"]=intersects
             nodes.append(node)
         return nodes,viewport
 
@@ -316,18 +207,19 @@ class PhoneController:
         nodes=[n for n in nodes if n["type"]!="XCUIElementTypeStatusBar" and n["rect"]["y"]>=45]
         return nodes
 
-    def remember(self,nodes,viewport,app,has_tree=True):
-        ident=uuid.uuid4().hex[:12]
-        self.snapshots[ident]={"time":time.monotonic(),"viewport":viewport,"app":app,"nodes":nodes if has_tree else None}
-        while len(self.snapshots)>32:
-            self.snapshots.popitem(last=False)
-        return ident
 
     def bounded_tree(self,include_invisible,expensive_visibility,limits):
-        saved=self.client.session("GET","/appium/settings")
-        if not isinstance(saved,dict) or any(not isinstance(saved.get(key),int) or isinstance(saved.get(key),bool) or saved[key]<1 for key in limits):
-            fail("invalid_response","PUA does not expose the requested native snapshot settings.",action_executed=False)
-        restore={key:saved[key] for key in limits}
+        # These are WDA's own pinned defaults and this class always restores them,
+        # so the read only has to happen once per channel instead of on every call.
+        cached=self._snapshot_defaults
+        if cached and all(key in cached for key in limits):
+            restore={key:cached[key] for key in limits}
+        else:
+            saved=self.client.session("GET","/appium/settings")
+            if not isinstance(saved,dict) or any(not isinstance(saved.get(key),int) or isinstance(saved.get(key),bool) or saved[key]<1 for key in limits):
+                fail("invalid_response","PUA does not expose the requested native snapshot settings.",action_executed=False)
+            restore={key:saved[key] for key in limits}
+            self._snapshot_defaults=dict(restore)
         if self.snapshot_restore:self.snapshot_restore(restore)
         operation="snapshot_settings_apply"
         try:
@@ -340,115 +232,18 @@ class PhoneController:
             # The native request may still be queued. Do not add another deadline
             # of synchronous cleanup to the failing read; restore on the next call.
             self.client.reapply_settings(restore)
+            self._snapshot_defaults=None
             if isinstance(error,WDAError) and operation!="snapshot_read":
                 error.details.update(action_executed=False,operation=operation)
             raise
         if self.snapshot_restore:self.snapshot_restore({})
         return result
 
-    def observe(self,mode="tree",include_invisible=False,max_nodes=DEFAULT_MAX_NODES,expensive_visibility=False,snapshot_max_depth=None,snapshot_max_children=None,prune=True,allow_stream_cache=True):
-        if mode not in ("tree","screenshot","both"):
-            fail("invalid_argument","mode must be tree, screenshot or both.")
-        integer(max_nodes,"max_nodes",1,500)
-        limits={}
-        for value,key,maximum in ((snapshot_max_depth,"snapshotMaxDepth",100),(snapshot_max_children,"snapshotMaxChildren",500)):
-            if value is not None:limits[key]=integer(value,key,1,maximum)
-        if limits and mode=="screenshot":
-            fail("invalid_argument","Snapshot limits require tree or both mode.",action_executed=False)
-        if mode=="screenshot":
-            app=self.active_app()
-            nodes,viewport=[],self.viewport(VIEWPORT_TTL)
-        else:
-            nodes,viewport=(self.bounded_tree(include_invisible,expensive_visibility,limits) if limits
-                            else self.tree(include_invisible,expensive_visibility))
-            app=self._source_app or self.active_app()
-        if prune and nodes:
-            nodes=prune_nodes(nodes)
-        result=self.observation_from_state(nodes,viewport,app,mode,max_nodes,expensive_visibility,pruned=prune,allow_stream_cache=allow_stream_cache)
-        if limits:
-            result.update(snapshot_limits=limits,tree_complete=False,truncated=True,total_nodes_scope="bounded_snapshot")
-            result.setdefault("warnings",[]).append("Native depth/child limits apply before snapshot creation, not by visible area. Controls or visible rows may be omitted; missing nodes do not prove absence or list completeness. Inspect a screenshot.")
-        return result
 
-    def observation_from_state(self,nodes,viewport,app,mode,max_nodes=DEFAULT_MAX_NODES,expensive_visibility=False,pruned=False,allow_stream_cache=True):
-        result={"observation_id":self.remember(nodes,viewport,app,has_tree=mode!="screenshot"),
-                "observed_at":dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),"app":app,"viewport":viewport}
-        if mode in ("tree","both"):
-            result.update({"nodes":[compact_node(node) for node in nodes[:max_nodes]],"total_nodes":len(nodes),"truncated":len(nodes)>max_nodes})
-            if expensive_visibility:result["visibility_computed"]=True
-            if pruned:result["pruned"]=True
-            if not nodes:
-                result["warnings"]=["Empty accessibility tree: inspect a screenshot for lock, iPhone Mirroring conflict, loading, or custom-rendered content before acting."]
-        if mode in ("screenshot","both"):
-            result["image"]=self.capture(viewport,allow_cached_stream=allow_stream_cache)
-        return result
 
-    def capture(self,viewport,allow_cached_stream=True):
-        """Native PNG kept as evidence; the model receives a bounded image with its exact point scale.
-        When a live stream is running, reuses the fresh cached frame to avoid a slow roundtrip."""
-        if allow_cached_stream and getattr(self, "screen", None):
-            try:
-                recent = self.screen.recent_frame(max_age_seconds=0.8)
-                if recent and recent.get("jpeg"):
-                    artifacts=self.state_dir/"artifacts";artifacts.mkdir(mode=0o700,parents=True,exist_ok=True)
-                    dest=artifacts/(dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")+"-"+uuid.uuid4().hex[:8]+".jpg")
-                    dest.write_bytes(recent["jpeg"]);dest.chmod(0o600)
-                    width, height = recent.get("width") or 0, recent.get("height") or 0
-                    if width and height and (width>height)!=(viewport["width"]>viewport["height"]):
-                        viewport.update(self.viewport())
-                    for pattern in ("*.png","*.jpg"):
-                        for old in sorted(artifacts.glob(pattern))[:-100]:
-                            old.unlink()
-                    image={"path":str(dest),"mimeType":"image/jpeg","cached_stream":True}
-                    if width and height:
-                        image.update(width=width,height=height,pixel_to_point=[round(viewport["width"]/width,4),round(viewport["height"]/height,4)])
-                    return image
-            except Exception:
-                pass
 
-        encoded=self.client.request("GET","/screenshot").get("value")
-        try:
-            data=base64.b64decode(encoded,validate=True)
-        except (ValueError,TypeError) as exc:
-            fail("invalid_response", "Invalid screenshot encoding.")
-        if not data.startswith(wda_image.PNG_SIGNATURE):
-            fail("invalid_response","PUA screenshot is not PNG.")
-        artifacts=self.state_dir/"artifacts";artifacts.mkdir(mode=0o700,parents=True,exist_ok=True)
-        dest=artifacts/(dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")+"-"+uuid.uuid4().hex[:8]+".png")
-        dest.write_bytes(data);dest.chmod(0o600)
-        native=wda_image.png_size(data[:32])
-        if native and (native[0]>native[1])!=(viewport["width"]>viewport["height"]):
-            # The capture is turned the other way than the remembered viewport: the phone rotated.
-            viewport.update(self.viewport())
-        path,mime,width,height=wda_image.model_image(dest)
-        for pattern in ("*.png","*.jpg"):
-            for old in sorted(artifacts.glob(pattern))[:-100]:
-                old.unlink()
-        image={"path":str(path),"mimeType":mime}
-        if width and height:
-            image.update(width=width,height=height,pixel_to_point=[round(viewport["width"]/width,4),round(viewport["height"]/height,4)])
-        return image
 
-    def snapshot(self,observation_id):
-        old=self.snapshots.get(observation_id)
-        if not old:
-            stale("This observation is unknown to the current Runtime. Observe again or use current viewport coordinates.","unknown_observation")
-        if self.active_app()!=old["app"]:
-            stale("The foreground app changed. Observe again.","foreground_changed")
-        return old
 
-    def guard(self,observation_id=None):
-        old=self.snapshot(observation_id) if observation_id is not None else None
-        # A supplied ID asks for a context check, so read the viewport again for it.
-        viewport=self.viewport(0 if old else VIEWPORT_TTL)
-        if old and viewport!=old["viewport"]:
-            stale("Orientation or viewport changed. Observe again before using the earlier coordinates.","viewport_changed")
-        return viewport
-
-    def guard_region(self,observation_id,region):
-        viewport=self.guard(observation_id)
-        self.region(region,viewport)
-        return viewport
 
     def query(self,selector,limit=CANDIDATE_LIMIT):
         """Matches in tree order, with whatever attributes PUA returned inline."""
@@ -614,11 +409,6 @@ class PhoneController:
                 fail("postcondition_failed","Expected target did not appear within the wait budget.",polls=attempts)
             time.sleep(min(0.25,max(0,deadline-time.monotonic())))
 
-    def observe_after(self,mode,max_nodes=DEFAULT_MAX_NODES):
-        """Allow a short transition without entering XCTest's unbounded idle path."""
-        if self.settle_seconds>0 and mode in ("tree","both","screenshot"):
-            time.sleep(min(self.settle_seconds,0.5))
-        return self.observe(mode,max_nodes=max_nodes)
 
     def after(self,expect=None,observe="none",max_nodes=DEFAULT_MAX_NODES):
         result={"action_executed":True,"action_complete":True,"verified":False,"verification_deferred":True}
@@ -748,28 +538,80 @@ class PhoneController:
         if selector is not None:self.post(path+"/click",{})
         if replace:
             self.post(path+"/clear",{})
+        expected = text if replace else str(before)+text
         # Fast path: For text >= 10 characters, try clipboard paste to avoid slow typing
         if len(text) >= 10:
             uuid = path.split("/")[-1] if path.startswith("/element/") else "0"
-            if self.try_paste_text(text, uuid):
-                return self.finish_input({"path":path,"expected":text if replace else str(before)+text,
+            if self.try_paste_text(text, uuid, path, expected):
+                return self.finish_input({"path":path,"expected":expected,
                                           "verify":verify,"submit":submit,"expect":expect,"observe":observe,
-                                          "typed":len(text),"total":len(text)})
+                                          "typed":len(text),"total":len(text),"paste":True,
+                                          "paste_verified":self.paste_verified})
         return self.type_pieces({"path":path,"focused":selector is None,"pieces":split_text(text,self.typing_piece),"typed":0,"total":len(text),
                                  "expected":text if replace else str(before)+text,"verify":verify,"submit":submit,"expect":expect,"observe":observe})
 
-    def try_paste_text(self, text, element_uuid="0"):
-        """Fast-path paste for long text via WDA setPasteboard and keyboardInput Cmd+V."""
+    def field_value(self, path, attempts=3, delay=0.12):
+        """Read an element value, tolerating a UI that updates a beat after typing.
+
+        Returns None when the element exposes no value attribute at all: that is
+        "unknown", never "empty"."""
+        last = None
+        for attempt in range(attempts):
+            try:
+                last = self.client.session("GET", path + "/attribute/value")
+            except WDAError:
+                return None
+            if isinstance(last, str) and last:
+                return last
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+        return last if last is not None else None
+
+    def try_paste_text(self, text, element_uuid, path, expected):
+        """Paste long text through the phone clipboard and prove it landed.
+
+        A paste that does nothing looks identical to a success over HTTP (no
+        hardware keyboard, focus stolen, system paste prompt), so the field is
+        always read back. Mismatch clears the field and falls back to per-character
+        typing; an unreadable field keeps the paste but reports it as unverified
+        rather than claiming an exact readback."""
+        self.paste_verified = None
+        previous = None
         try:
+            try:
+                previous = self.client.request("GET", "/wda/getPasteboard").get("value")
+            except WDAError:
+                previous = None
             b64_content = base64.b64encode(text.encode("utf-8")).decode("ascii")
             self.client.request("POST", "/wda/setPasteboard", {"content": b64_content, "contentType": "plaintext"})
             sid = getattr(self.client, "session_id", None)
-            if sid:
-                # 1048576 is XCUIKeyModifierCommand (1 << 20)
-                self.client.request("POST", f"/session/{sid}/wda/element/{element_uuid}/keyboardInput",
-                                    {"keys": [{"key": "v", "modifierFlags": 1048576}]})
-                return True
-        except Exception:
+            if not sid:
+                return False
+            # 1048576 is XCUIKeyModifierCommand (1 << 20)
+            self.client.request("POST", f"/session/{sid}/wda/element/{element_uuid}/keyboardInput",
+                                {"keys": [{"key": "v", "modifierFlags": 1048576}]})
+        except WDAError:
+            return False
+        finally:
+            # The clipboard belongs to the user: put back what was there before.
+            if isinstance(previous, str) and previous:
+                try:
+                    self.client.request("POST", "/wda/setPasteboard", {"content": previous, "contentType": "plaintext"})
+                except WDAError:
+                    pass
+        actual = self.field_value(path)
+        if actual is None:
+            # No readable value: the paste may have worked, so typing again would
+            # duplicate it. Report the honest uncertainty instead.
+            self.paste_verified = False
+            return True
+        self.paste_verified = actual == expected
+        if self.paste_verified:
+            return True
+        # The field does not hold the text: start typing from a clean field.
+        try:
+            self.post(path + "/clear", {})
+        except WDAError:
             pass
         return False
 
@@ -783,6 +625,14 @@ class PhoneController:
         result = {"action_executed": True, "action_complete": True, "verified": bool(plan.get("verify")),
                   "verification_deferred": not plan.get("verify"), "exact_readback": bool(plan.get("verify")),
                   "characters": plan["total"], "submitted": False}
+        if plan.get("paste"):
+            result["input_method"] = "clipboard-paste"
+            if plan.get("paste_verified") is True:
+                result.update(exact_readback=True, verified=True, verification_deferred=False,
+                              verification_scope="Field value matched the intended text after pasting.")
+            else:
+                result.update(exact_readback=False, verified=False, verification_deferred=True,
+                              verification_required="Clipboard paste was sent but the field value could not be read back. Inspect the field before submitting or typing again; do not replay.")
         if plan.get("submit"):
             self.post("/wda/keys", {"value": ["\n"]})
             result.update({"submitted": True, "verified": False, "verification_deferred": True, "submission_verified": False,
@@ -872,28 +722,9 @@ class PhoneController:
         if path!=plan["path"]:expired("focus_changed")
         return self.type_pieces(plan)
 
-    def region(self,region,viewport):
-        if region is None:
-            return {"x":viewport["width"]*.15,"y":viewport["height"]*.25,"width":viewport["width"]*.7,"height":viewport["height"]*.5}
-        if not isinstance(region,dict) or set(region)!={"x","y","width","height"}:
-            fail("invalid_argument","region must have x/y/width/height in iPhone points.")
-        for k,v in region.items():finite(v,k,0 if k in ("x","y") else 1)
-        if region["x"]+region["width"]>viewport["width"] or region["y"]+region["height"]>viewport["height"]:
-            fail("invalid_argument","Gesture region is outside viewport.")
-        return region
 
-    def native_modals(self,nodes):
-        return [{k:n[k] for k in ("type","name","label","rect") if k in n} for n in nodes if n["type"] in ("XCUIElementTypeAlert","XCUIElementTypeSheet")]
 
-    @staticmethod
-    def modal_report(modals):
-        return [compact_node(modal) for modal in modals]
 
-    def scroll_observation(self,nodes,viewport,mode,max_nodes=DEFAULT_MAX_NODES):
-        if mode=="none":return None
-        # The caller already read the complete tree and viewport. Reuse both;
-        # adding a screenshot does not require another viewport/XML request.
-        return self.observation_from_state(nodes,viewport,self._source_app or self.active_app(),mode,max_nodes)
 
     def scroll_progress(self,before,after,region,direction):
         # Numeric/value refreshes and animation metadata are not movement.
@@ -937,27 +768,14 @@ class PhoneController:
         area=self.region(region,viewport)
         modals=self.native_modals(before) if verify else []
         if modals:
-            contained=lambda m:area["x"]>=m["rect"]["x"] and area["y"]>=m["rect"]["y"] and area["x"]+area["width"]<=m["rect"]["x"]+m["rect"]["width"] and area["y"]+area["height"]<=m["rect"]["y"]+m["rect"]["height"]
-            if region is None or not all(contained(m) for m in modals):
+            if region is None or not all(contains_rect(area,m["rect"]) for m in modals):
                 details={"action_executed":False,"verified":False,"region":area,"native_modals":self.modal_report(modals),"recovery":{"next_tool":"pua_observe","next_arguments":{"mode":"both"},"replay_action":False,"next_step":"Handle the existing modal first, or choose a fresh explicit scroll region wholly inside its intended list. Do not scroll the underlying page through a modal."}}
                 observed=self.scroll_observation(before,viewport,"tree" if observe in ("tree","both") else "none",_max_nodes)
                 if observed:details["observation"]=observed
                 fail("modal_requires_region" if region is None else "blocked_scroll_region","Native modals are present. The intended scroll area must be explicit and inside every modal's bounds; otherwise handle the foreground modal first.",**details)
-        x=area["x"]+area["width"]/2;y=area["y"]+area["height"]/2
-        dx=area["width"]*.32;dy=area["height"]*.32
-        raw_points={"up":(x,y+dy,x,y-dy),"down":(x,y-dy,x,y+dy),"left":(x+dx,y,x-dx,y),"right":(x-dx,y,x+dx,y)}[direction]
-        # Safe Area Clamping: prevent swiping into notification center (top 60pt)
-        # or Home Indicator (bottom 45pt) which triggers app exit/task switch.
-        v_w, v_h = viewport["width"], viewport["height"]
-        safe_top = min(60.0, v_h * 0.1)
-        safe_bottom = min(45.0, v_h * 0.1)
-        safe_margin = min(15.0, v_w * 0.05)
-        fx, fy, tx, ty = raw_points
-        fx = max(safe_margin, min(v_w - safe_margin, fx))
-        tx = max(safe_margin, min(v_w - safe_margin, tx))
-        fy = max(safe_top, min(v_h - safe_bottom, fy))
-        ty = max(safe_top, min(v_h - safe_bottom, ty))
-        points = (fx, fy, tx, ty)
+        # Clamped clear of the system gesture areas: pulling from the top edge opens
+        # Notification Center, reaching the bottom edge triggers the Home Indicator.
+        points = swipe_points(area, viewport, direction)
         # max_attempts=2 remains accepted for older callers, but a failed first
         # gesture now yields a screenshot instead of an unseen fallback gesture.
         self.post("/wda/dragfromtoforduration",dict(zip(("fromX","fromY","toX","toY"),points),duration=.1))

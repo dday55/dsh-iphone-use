@@ -6,6 +6,7 @@ no npm, no appium-ios-device dependency required.
 """
 from __future__ import annotations
 
+import obslog
 import os
 import plistlib
 import select
@@ -161,7 +162,7 @@ def run_forwarder(udid: str, local_port: int, device_port: int, stop_event: Opti
             try:
                 device_sock = connect_device_port(udid, device_port)
             except Exception as exc:
-                print(f"[usbmux forwarder] failed to connect to device port {device_port}: {exc}", file=sys.stderr)
+                obslog.log_event("forwarder_connect_failed", device_port=device_port, error=type(exc).__name__)
                 client_sock.close()
                 continue
 

@@ -11,6 +11,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import obslog
 import os
 from pathlib import Path
 import plistlib
@@ -852,7 +853,7 @@ def _worker(state_dir, job_id, owner_token, base_url):
         job.update(state="stopped", completed_at=_now(), error=str(error))
     except Exception as error:
         job.update(state="failed", completed_at=_now(), error=_redact(error))
-        print(_redact(error), file=sys.stderr, flush=True)
+        obslog.log_event("setup_failed", job=job.get("id"), action=job.get("action"), error=_redact(error))
     finally:
         # All commands inherit this worker's group. Broadcast TERM to include
         # grandchildren, temporarily ignoring it in the leader while cleaning up.
