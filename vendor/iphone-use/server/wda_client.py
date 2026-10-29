@@ -124,9 +124,13 @@ class WDAClient:
             body = None if payload is None else json.dumps(payload, ensure_ascii=False, allow_nan=False).encode()
             try:
                 self.connection.request(method, path, body, {"Content-Type": "application/json", "Accept": "application/json"})
-            except (http.client.CannotSendRequest, http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError):
-                # Stale idle socket closed by remote; reconnect fresh once
+            except (http.client.CannotSendRequest, http.client.RemoteDisconnected, BrokenPipeError, ConnectionResetError) as exc:
+                # A stale keep-alive socket usually dies before the body is written,
+                # but a write can also fail after a partial send. Resending is only
+                # safe for reads; a write becomes action_uncertain and stays unretried.
                 self.close()
+                if not readonly:
+                    raise self.transport_error(exc, readonly) from exc
                 self.connection = http.client.HTTPConnection(self.host, self.port, timeout=budget)
                 self.connection.request(method, path, body, {"Content-Type": "application/json", "Accept": "application/json"})
                 if self.connection.sock:
