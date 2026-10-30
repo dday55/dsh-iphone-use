@@ -83,6 +83,33 @@ class PasteVerificationTest(unittest.TestCase):
         self.assertTrue(controller.try_paste_text("Pasted text", "42", "/element/42", "Pasted text"))
         self.assertEqual(len(client.pasteboard_writes), 1)
 
+    def test_append_mode_keeps_the_existing_text_when_the_paste_does_nothing(self):
+        client = FakeClient(value="原有的内容")
+        controller = self.controller(client)
+        # The paste did not insert anything: the field still holds what it held before.
+        self.assertFalse(controller.try_paste_text("追加的文本内容", "42", "/element/42",
+                                                   "原有的内容追加的文本内容", replace=False, before="原有的内容"))
+        self.assertIs(controller.paste_verified, False)
+        self.assertEqual(client.clicked, [])  # never clear the user's text
+
+    def test_append_mode_succeeds_when_the_readback_matches(self):
+        client = FakeClient(value="原有的内容追加的文本内容")
+        controller = self.controller(client)
+        self.assertTrue(controller.try_paste_text("追加的文本内容", "42", "/element/42",
+                                                  "原有的内容追加的文本内容", replace=False, before="原有的内容"))
+        self.assertIs(controller.paste_verified, True)
+        self.assertEqual(client.clicked, [])
+
+    def test_append_mode_with_an_unexpected_field_state_stops_instead_of_clearing(self):
+        client = FakeClient(value="被别的东西改过")
+        controller = self.controller(client)
+        with self.assertRaises(WDAError) as caught:
+            controller.try_paste_text("追加的文本内容", "42", "/element/42",
+                                      "原有的内容追加的文本内容", replace=False, before="原有的内容")
+        self.assertEqual(caught.exception.code, "input_state_unknown")
+        self.assertEqual(client.clicked, [])
+        self.assertIs(caught.exception.details["recovery"]["replay_action"], False)
+
     def test_finish_input_reports_the_paste_verdict(self):
         client = FakeClient(value="Pasted text")
         controller = self.controller(client)

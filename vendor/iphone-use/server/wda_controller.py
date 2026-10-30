@@ -532,7 +532,9 @@ class PhoneController(ObservationMixin):
             self.switch_to_coordinates(error,typing=True);raise
         if ("\n" in text or "\r" in text) and kind!="XCUIElementTypeTextView":
             fail("newline_unsafe","Line breaks are allowed only for a verified TextView.")
-        before=(self.client.session("GET",path+"/attribute/value") or "") if verify and not replace else ""
+        # Append mode always needs the current content: it is both the expected
+        # result and the proof that a failed paste did not change anything.
+        before=(self.client.session("GET",path+"/attribute/value") or "") if not replace else ""
         self.pending_input=None
         # Without a selector the field was focused by a coordinate tap; another tap could move the caret.
         if selector is not None:self.post(path+"/click",{})
@@ -542,7 +544,7 @@ class PhoneController(ObservationMixin):
         # Fast path: For text >= 10 characters, try clipboard paste to avoid slow typing
         if len(text) >= 10:
             uuid = path.split("/")[-1] if path.startswith("/element/") else "0"
-            if self.try_paste_text(text, uuid, path, expected):
+            if self.try_paste_text(text, uuid, path, expected, replace=replace, before=before):
                 return self.finish_input({"path":path,"expected":expected,
                                           "verify":verify,"submit":submit,"expect":expect,"observe":observe,
                                           "typed":len(text),"total":len(text),"paste":True,
@@ -567,14 +569,14 @@ class PhoneController(ObservationMixin):
                 time.sleep(delay)
         return last if last is not None else None
 
-    def try_paste_text(self, text, element_uuid, path, expected):
+    def try_paste_text(self, text, element_uuid, path, expected, replace=True, before=None):
         """Paste long text through the phone clipboard and prove it landed.
 
         A paste that does nothing looks identical to a success over HTTP (no
         hardware keyboard, focus stolen, system paste prompt), so the field is
-        always read back. Mismatch clears the field and falls back to per-character
-        typing; an unreadable field keeps the paste but reports it as unverified
-        rather than claiming an exact readback."""
+        always read back. Only a replacing call may clear the field afterwards:
+        when text is being appended, the existing content is the user's and must
+        never be discarded to make room for the fallback."""
         self.paste_verified = None
         previous = None
         try:
@@ -608,12 +610,22 @@ class PhoneController(ObservationMixin):
         self.paste_verified = actual == expected
         if self.paste_verified:
             return True
-        # The field does not hold the text: start typing from a clean field.
-        try:
-            self.post(path + "/clear", {})
-        except WDAError:
-            pass
-        return False
+        if replace:
+            # A replacing call owns the field, so starting from a clean one is safe.
+            try:
+                self.post(path + "/clear", {})
+            except WDAError:
+                pass
+            return False
+        if before is not None and actual == before:
+            # Append mode and the field is provably unchanged: typing is safe.
+            return False
+        # Append mode with an unexpected field state: retyping could duplicate and
+        # clearing could destroy the user's text, so hand the state back instead.
+        fail("input_state_unknown",
+             "Clipboard paste in append mode left the field in an unexpected state. The existing text was not modified further; observe the field before deciding what remains.",
+             expected_length=len(expected), actual_length=len(str(actual or "")),
+             recovery={"replay_action": False, "next_step": "Observe the field, then decide whether to append the remaining text or replace it explicitly."})
 
     def finish_input(self, plan):
         self.pending_input = None
