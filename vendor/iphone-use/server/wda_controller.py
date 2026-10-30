@@ -97,6 +97,9 @@ class PhoneController(ObservationMixin):
         self._snapshot_defaults=None
         # None = the fast clipboard path did not run; True/False = its readback verdict.
         self.paste_verified=None
+        # Apps that turn Cmd+V into a literal "v" (Xiaohongshu does): remember them so
+        # later calls stop paying the probe and stop leaving a stray character.
+        self.paste_blocked_apps=set()
         self._observed_digest=None
         self._pre_action_digest=None
         self.typing_frequency=TYPING_FREQUENCY
@@ -541,14 +544,20 @@ class PhoneController(ObservationMixin):
         if replace:
             self.post(path+"/clear",{})
         expected = text if replace else str(before)+text
-        # Fast path: For text >= 10 characters, try clipboard paste to avoid slow typing
-        if len(text) >= 10:
+        # Fast path: for a replacing call with long text, try the clipboard instead of
+        # typing. Append mode never pastes: a clipboard that half-works leaves a stray
+        # character in text the user wrote, and only a replacing call can undo that.
+        app=self._source_app
+        if len(text) >= 10 and replace and app not in self.paste_blocked_apps:
             uuid = path.split("/")[-1] if path.startswith("/element/") else "0"
-            if self.try_paste_text(text, uuid, path, expected, replace=replace, before=before):
+            if self.try_paste_text(text, uuid, path, expected, replace=True, before=before):
                 return self.finish_input({"path":path,"expected":expected,
                                           "verify":verify,"submit":submit,"expect":expect,"observe":observe,
                                           "typed":len(text),"total":len(text),"paste":True,
                                           "paste_verified":self.paste_verified})
+            if self.paste_verified is False and app:
+                # This app does not honour the paste chord; type from now on.
+                self.paste_blocked_apps.add(app)
         return self.type_pieces({"path":path,"focused":selector is None,"pieces":split_text(text,self.typing_piece),"typed":0,"total":len(text),
                                  "expected":text if replace else str(before)+text,"verify":verify,"submit":submit,"expect":expect,"observe":observe})
 

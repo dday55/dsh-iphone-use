@@ -49,6 +49,56 @@ class FakeClient:
         raise AssertionError(f"unexpected session {method} {path}")
 
 
+class TypingClient(FakeClient):
+    """Drives the whole type_text pipeline: paste probe, clear, per-piece typing."""
+
+    def __init__(self, value="", paste_writes_a_literal=None):
+        super().__init__(value=value)
+        self.value = value
+        self.paste_writes_a_literal = paste_writes_a_literal
+        self.clicked = []
+        self.keyboards = []
+        self.typed = []
+
+    def request(self, method, path, payload=None, timeout=None):
+        if path == "/wda/getPasteboard":
+            return {"value": ""}
+        if path == "/wda/setPasteboard":
+            self.pasteboard_writes.append(payload["content"])
+            return {"value": None}
+        if path.endswith("/keyboardInput"):
+            self.keyboards.append(payload)
+            if self.paste_writes_a_literal:
+                self.value += self.paste_writes_a_literal
+            return {"value": None}
+        raise AssertionError(f"unexpected request {method} {path}")
+
+    def session(self, method, path, payload=None, timeout=None):
+        if path.endswith("/attribute/value"):
+            return self.value
+        if path.endswith("/clear"):
+            self.clicked.append(path)
+            self.value = ""
+            return {"value": None}
+        if path.endswith("/value") or path == "/wda/keys":
+            text = payload.get("text") or "".join(payload.get("value") or [])
+            self.typed.append(text)
+            self.value += text
+            return {"value": None}
+        if path.endswith("/click"):
+            return {"value": None}
+        if path == "/elements":
+            return [{"element-6066-11e4-a52e-4f735466cecf": "42", "type": "XCUIElementTypeTextField",
+                     "rect": {"x": 10, "y": 10, "width": 200, "height": 40}, "attribute/hittable": True}]
+        if path.endswith("/attribute/hittable"):
+            return True
+        if path.endswith("/attribute/type"):
+            return "XCUIElementTypeTextField"
+        if path == "/window/size":
+            return {"width": 375, "height": 667}
+        raise AssertionError(f"unexpected session {method} {path}")
+
+
 class PasteVerificationTest(unittest.TestCase):
     def controller(self, client):
         directory = tempfile.mkdtemp(prefix="iphone-use-test-")
@@ -82,6 +132,27 @@ class PasteVerificationTest(unittest.TestCase):
         controller = self.controller(client)
         self.assertTrue(controller.try_paste_text("Pasted text", "42", "/element/42", "Pasted text"))
         self.assertEqual(len(client.pasteboard_writes), 1)
+
+    def test_append_mode_never_touches_the_clipboard(self):
+        client = TypingClient(value="原有的内容")
+        controller = self.controller(client)
+        controller._source_app = "com.xingin.discover"
+        result = controller.type_text(selector={"label": "搜索框"}, text="追加的长文本内容示例", replace=False, verify=False)
+        # Append mode must skip the paste probe: a half-working chord would leave a
+        # stray character inside text the user wrote.
+        self.assertEqual(client.pasteboard_writes, [])
+        self.assertEqual(client.keyboards, [])
+        self.assertTrue(result["action_complete"])
+        self.assertEqual(client.value, "原有的内容追加的长文本内容示例")
+
+    def test_a_rejecting_app_is_remembered_so_the_probe_is_not_repeated(self):
+        client = TypingClient(value="", paste_writes_a_literal="v")
+        controller = self.controller(client)
+        controller._source_app = "com.xingin.discover"
+        controller.type_text(selector={"label": "搜索框"}, text="长文本内容示例的文本", replace=True, verify=False)
+        self.assertIn("com.xingin.discover", controller.paste_blocked_apps)
+        # The stray character the chord typed was cleared, and the real text was typed.
+        self.assertEqual(client.value, "长文本内容示例的文本")
 
     def test_append_mode_keeps_the_existing_text_when_the_paste_does_nothing(self):
         client = FakeClient(value="原有的内容")
